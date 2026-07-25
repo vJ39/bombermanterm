@@ -13,11 +13,13 @@ cargo run --release
 
 ```sh
 # ホスト(自分もプレイする)。--players は2〜4人(既定3)
-bombermanterm host --port 4321 --players 3
+cargo run --release -- host --port 4321 --players 3
 
 # 参加する側。アドレスは host:port
-bombermanterm join 192.168.1.10:4321
+cargo run --release -- join 192.168.1.10:4321
 ```
+
+(`cargo install --path .` 済みなら `bombermanterm host ...` / `bombermanterm join ...` とそのまま呼べる)
 
 参加者が揃うとホストの画面に開始の案内が出るので、ホストが Space を押すと対戦が始まる。対戦ではCPU敵は出ず、最後に残った1人が勝ち(相打ちは引き分け)。
 

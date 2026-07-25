@@ -195,6 +195,20 @@ impl GameState {
         }
     }
 
+    /// ネットワーク対戦でクライアントが切断した際、そのプレイヤーを退場させる。
+    ///
+    /// 切断してもサーバー(ネットワーク層)は入力が届かなくなるだけで、
+    /// このメソッドを呼ばない限り `players[id].alive` は変わらず、対戦の
+    /// 決着判定(生存者が1人になったら勝ち)が正しく働かない
+    /// (最後の対戦相手が切断しても試合が終わらない)。呼び出し側
+    /// ([`crate::main::run_host`])が切断イベントを検知するたびに呼ぶ。
+    /// 既に死亡済み・存在しない添字なら何もしない。
+    pub fn retire_player(&mut self, player_id: usize) {
+        if let Some(player) = self.players.get_mut(player_id) {
+            player.alive = false;
+        }
+    }
+
     /// 固定tickでの状態更新(1人プレイ用の後方互換ラッパー)。
     ///
     /// 本体ロジックは [`GameState::tick_multi`] にあり、ここは受け取った1つの
@@ -1651,6 +1665,55 @@ mod tests {
             state.screen,
             Screen::Playing,
             "two players are still alive so the match continues"
+        );
+    }
+
+    #[test]
+    fn retire_player_marks_them_dead_without_touching_others() {
+        let mut audio = NoopAudio::default();
+        let mut state = started_versus(3, &mut audio);
+
+        state.retire_player(1);
+
+        assert!(!state.players[1].alive, "retired player must be marked dead");
+        assert!(state.players[0].alive);
+        assert!(state.players[2].alive);
+    }
+
+    #[test]
+    fn retire_player_ignores_an_out_of_range_index() {
+        let mut audio = NoopAudio::default();
+        let mut state = started_versus(2, &mut audio);
+
+        // パニックしないことだけを確認する(存在しないプレイヤー番号)。
+        state.retire_player(99);
+        assert!(state.players[0].alive);
+        assert!(state.players[1].alive);
+    }
+
+    #[test]
+    fn a_disconnect_via_retire_player_ends_the_match_for_the_last_survivor() {
+        // ネットワーク対戦で相手が全員切断した状況を模す:
+        // GameState::retire_player を呼ぶだけでは決着判定は走らないので、
+        // 次の tick_multi でちゃんと勝者確定することを確認する
+        // (main.rs::run_host はこの2つを同じtick内で順に呼ぶ)。
+        let mut audio = NoopAudio::default();
+        let mut state = started_versus(3, &mut audio);
+
+        state.retire_player(1);
+        state.retire_player(2);
+        assert_eq!(
+            state.screen,
+            Screen::Playing,
+            "retire_player自体は決着判定を進めない"
+        );
+
+        state.tick_multi(0.033, &[Action::None; 3], &mut audio);
+
+        assert_eq!(
+            state.screen,
+            Screen::MatchResult(Some(0)),
+            "残った1人(切断していないプレイヤー0)が勝者になる"
         );
     }
 

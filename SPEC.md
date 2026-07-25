@@ -7,7 +7,7 @@
 - 言語: Rust (stable, cargo)
 - TUI描画/入力: ratatui + crossterm
 - 音声再生: rodio
-- 音声素材: オリジナルのチップチューン風SE/BGM（矩形波・三角波・ノイズ合成のPCMを自前生成し `assets/audio/` にwavとして同梱）
+- 音声素材: オリジナルのチップチューン風SE/BGM（矩形波・三角波・ノイズ合成を実行時にオンザフライ生成する。wav等のファイル同梱は無し）
 - 乱数: rand
 
 ## スコープ (v1 MVP)
@@ -37,10 +37,8 @@ src/
   main.rs        エントリポイント、ターミナル初期化(raw mode)、メインループ
   game/          ゲーム状態・エンティティ(Player, Enemy, Bomb, Explosion, Item)・マップ
   render/        ratatui描画
-  audio/         rodio再生管理(BGM/SE)
+  audio/         rodio再生管理(BGM/SE)。音源合成は audio/synth.rs
   input/         キー入力→アクション変換（将来ネットワーク対戦時に入力ソースを差し替えられるようtrait化）
-assets/
-  audio/         オリジナル音源(wav)
 ```
 - メインループは固定tick（例 30fps相当）で 入力処理 → 状態更新 → 描画 の順に回す
 

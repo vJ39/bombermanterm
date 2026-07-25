@@ -123,7 +123,7 @@ mod tests {
     /// 検証に使う `Action` の全バリアント。
     /// 新しいバリアントが増えたらここにも足す(網羅漏れを機械的に気付けるよう
     /// `Action` を match して列挙する形にはせず、意図的に手で並べている)。
-    const ALL_ACTIONS: [Action; 10] = [
+    const ALL_ACTIONS: [Action; 11] = [
         Action::Move(Direction::Up),
         Action::Move(Direction::Down),
         Action::Move(Direction::Left),
@@ -133,6 +133,7 @@ mod tests {
         Action::Quit,
         Action::ToggleGodMode,
         Action::ZoomIn,
+        Action::ZoomOut,
         Action::None,
     ];
 

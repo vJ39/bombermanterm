@@ -94,15 +94,28 @@ fn main() -> io::Result<()> {
     }
 }
 
-/// 端末を代替画面へ切り替えて `body` を実行し、終了時に必ず元へ戻す。
+/// `body` の実行中にpanicしても端末を元へ戻すためのガード。
+///
+/// 通常の `Err` 経路は呼び出し側で `ratatui::restore()` を直接呼べば済むが、
+/// `body` 内でpanicするとその呼び出しまで到達せず、raw mode/代替画面に
+/// 入ったままの端末が残ってユーザーの手元シェルが壊れて見える。Dropは
+/// panicによる巻き戻し(unwind)でも実行されるため、ここに復元処理を置く。
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        ratatui::restore();
+    }
+}
+
+/// 端末を代替画面へ切り替えて `body` を実行し、終了時(panicを含む)に必ず元へ戻す。
 fn with_terminal<F>(body: F) -> io::Result<()>
 where
     F: FnOnce(&mut ratatui::DefaultTerminal) -> io::Result<()>,
 {
     let mut terminal = ratatui::init();
-    let result = body(&mut terminal);
-    ratatui::restore();
-    result
+    let _guard = TerminalGuard;
+    body(&mut terminal)
 }
 
 /// 1tickの残り時間だけ寝て、次のtickまでの間隔を揃える。
@@ -208,6 +221,13 @@ fn run_host(
             .latest_client_inputs()
             .unwrap_or_else(|| vec![Action::None; MAX_PLAYERS]);
         actions[0] = own_action;
+
+        // 切断は「入力が来なくなる」だけではGameStateに伝わらないため、
+        // 明示的にプレイヤーを退場させる(でないと最後の相手が切断しても
+        // 対戦の決着判定が働かず試合が終わらない)。
+        for player_id in server.take_disconnected() {
+            state.retire_player(player_id);
+        }
 
         state.set_lobby_connected(server.player_count());
         state.tick_multi(dt_secs, &actions, &mut audio);

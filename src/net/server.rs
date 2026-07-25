@@ -67,6 +67,15 @@ pub struct ServerHandle {
     /// エンコードまで面倒を見る [`ServerHandle::send_snapshot`] 経由で使う。
     pub outbound: Sender<SnapshotFrame>,
 
+    /// 切断が起きるたびに、そのプレイヤー番号が1つ届く。
+    ///
+    /// クライアントの切断は「入力が来なくなる」だけでは`GameState`に伝わらない
+    /// (`players[id].alive`は変わらないまま)ため、呼び出し側が
+    /// [`ServerHandle::take_disconnected`] で拾って `GameState::retire_player`
+    /// を呼ぶ必要がある。これをしないと、対戦中に相手が全員切断しても
+    /// 決着判定(生存者が1人になったら勝ち)が働かず試合が終わらない。
+    disconnected: Receiver<usize>,
+
     /// 接続中のクライアント数(ホスト自身は含まない)。
     client_count: Arc<AtomicUsize>,
 
@@ -103,6 +112,12 @@ impl ServerHandle {
         }
 
         merged
+    }
+
+    /// 前回呼び出し以降に切断されたプレイヤー番号を全部取り出す。
+    /// 呼び出し側は返ってきた各番号に `GameState::retire_player` を適用すること。
+    pub fn take_disconnected(&self) -> Vec<usize> {
+        self.disconnected.try_iter().collect()
     }
 
     /// 最新のゲーム状態を全クライアントへ配る。
@@ -151,6 +166,7 @@ pub fn spawn(port: u16, max_clients: usize) -> io::Result<ServerHandle> {
 
     let (inbound_tx, inbound_rx) = mpsc::channel::<Vec<Action>>();
     let (outbound_tx, outbound_rx) = mpsc::channel::<SnapshotFrame>();
+    let (disconnected_tx, disconnected_rx) = mpsc::channel::<usize>();
     let client_count = Arc::new(AtomicUsize::new(0));
     let shared = Arc::new(Mutex::new(Shared::new()));
 
@@ -173,12 +189,14 @@ pub fn spawn(port: u16, max_clients: usize) -> io::Result<ServerHandle> {
                 thread_client_count,
                 inbound_tx,
                 outbound_rx,
+                disconnected_tx,
             ));
         })?;
 
     Ok(ServerHandle {
         inbound: inbound_rx,
         outbound: outbound_tx,
+        disconnected: disconnected_rx,
         client_count,
         local_addr,
     })
@@ -250,6 +268,7 @@ async fn serve(
     client_count: Arc<AtomicUsize>,
     inbound_tx: Sender<Vec<Action>>,
     outbound_rx: Receiver<SnapshotFrame>,
+    disconnected_tx: Sender<usize>,
 ) {
     let listener = match TcpListener::from_std(listener) {
         Ok(listener) => listener,
@@ -300,6 +319,7 @@ async fn serve(
             Arc::clone(&shared),
             Arc::clone(&client_count),
             broadcast_tx.clone(),
+            disconnected_tx.clone(),
         ));
     }
 }
@@ -357,6 +377,7 @@ async fn handle_client(
     shared: Arc<Mutex<Shared>>,
     client_count: Arc<AtomicUsize>,
     broadcast_tx: broadcast::Sender<SnapshotFrame>,
+    disconnected_tx: Sender<usize>,
 ) {
     // 対戦ゲームなので、まとめ送りより即時性を優先する。
     let _ = stream.set_nodelay(true);
@@ -366,7 +387,7 @@ async fn handle_client(
         .await
         .is_err()
     {
-        release_slot(&shared, &client_count, player_id);
+        release_slot(&shared, &client_count, &disconnected_tx, player_id);
         return;
     }
 
@@ -397,16 +418,23 @@ async fn handle_client(
     }
 
     writer_task.abort();
-    release_slot(&shared, &client_count, player_id);
+    release_slot(&shared, &client_count, &disconnected_tx, player_id);
     // 残っているクライアントへ離脱を伝える。エンコードに失敗しても致命的ではない。
     if let Ok(frame) = protocol::encode_frame(&ServerMessage::PlayerLeft { player_id }) {
         let _ = broadcast_tx.send(Arc::new(frame));
     }
 }
 
-/// 切断したクライアントのプレイヤー枠を解放する。
-fn release_slot(shared: &Mutex<Shared>, client_count: &AtomicUsize, player_id: usize) {
+/// 切断したクライアントのプレイヤー枠を解放し、メインスレッドへ通知する。
+fn release_slot(
+    shared: &Mutex<Shared>,
+    client_count: &AtomicUsize,
+    disconnected_tx: &Sender<usize>,
+    player_id: usize,
+) {
     shared.lock().expect("server state lock").disconnect(player_id);
+    // メインスレッドが受け取りを止めていても(ゲーム終了等)実害はないので無視する。
+    let _ = disconnected_tx.send(player_id);
     // 二重に減らして 0 を下回らないよう、接続中だったときだけ減算する。
     let _ = client_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
         count.checked_sub(1)
@@ -509,6 +537,7 @@ mod tests {
         let handle = ServerHandle {
             inbound: rx,
             outbound: mpsc::channel().0,
+            disconnected: mpsc::channel().1,
             client_count: Arc::new(AtomicUsize::new(0)),
             local_addr: "127.0.0.1:0".parse().expect("addr"),
         };
@@ -539,5 +568,39 @@ mod tests {
 
         // 取り込んだ分は消費済み。
         assert!(handle.latest_client_inputs().is_none());
+    }
+
+    #[test]
+    fn take_disconnected_drains_every_pending_notification() {
+        let (tx, rx) = mpsc::channel::<usize>();
+        let handle = ServerHandle {
+            inbound: mpsc::channel().1,
+            outbound: mpsc::channel().0,
+            disconnected: rx,
+            client_count: Arc::new(AtomicUsize::new(0)),
+            local_addr: "127.0.0.1:0".parse().expect("addr"),
+        };
+
+        assert_eq!(handle.take_disconnected(), Vec::<usize>::new());
+
+        tx.send(2).expect("send");
+        tx.send(3).expect("send");
+        assert_eq!(handle.take_disconnected(), vec![2, 3]);
+        // 一度取り出した分は消費済み。
+        assert_eq!(handle.take_disconnected(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn release_slot_notifies_the_disconnected_channel() {
+        let mut shared = Shared::new();
+        let id = shared.claim_slot(3).expect("slot");
+        let shared = Mutex::new(shared);
+        let client_count = AtomicUsize::new(1);
+        let (tx, rx) = mpsc::channel::<usize>();
+
+        release_slot(&shared, &client_count, &tx, id);
+
+        assert_eq!(rx.try_recv(), Ok(id));
+        assert!(!shared.lock().expect("lock").connected[id]);
     }
 }

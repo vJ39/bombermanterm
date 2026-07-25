@@ -218,6 +218,51 @@ mod tests {
     }
 
     #[test]
+    fn a_client_disconnect_reaches_the_hosts_game_logic_and_retires_them() {
+        // `main.rs::run_host` と同じ順序(take_disconnected → retire_player →
+        // tick_multi)をテスト内で再現し、実際のTCP切断がGameStateまで
+        // 届いて対戦の決着判定に反映されることを確認する。
+        let server = server::spawn(0, 2).expect("bind an ephemeral port");
+        let addr = server.local_addr().to_string();
+
+        let first = client::spawn(&addr).expect("first client connects");
+        assert_eq!(first.player_id, 1);
+        let second = client::spawn(&addr).expect("second client connects");
+        assert_eq!(second.player_id, 2);
+        assert!(wait_until(TIMEOUT, || server.connected_clients() == 2));
+
+        let mut audio = SilentAudio;
+        let mut state = GameState::new_multiplayer(3);
+        let dt = INPUT_COLLECT_INTERVAL.as_secs_f32();
+        state.tick_multi(dt, &[Action::PlaceBomb, Action::None, Action::None], &mut audio);
+        assert_eq!(state.screen, Screen::Playing);
+
+        // 2人のクライアントを両方切断する(実際の対戦なら「相手が全員切断」に相当)。
+        drop(first);
+        drop(second);
+
+        let retired = wait_until(TIMEOUT, || {
+            for player_id in server.take_disconnected() {
+                state.retire_player(player_id);
+            }
+            !state.players[1].alive && !state.players[2].alive
+        });
+        assert!(
+            retired,
+            "切断がGameStateへ届いてプレイヤーが退場すること: {:?}",
+            state.players.iter().map(|p| p.alive).collect::<Vec<_>>()
+        );
+
+        // 次のtickで決着判定が走り、切断していないホスト(プレイヤー0)の勝ちになる。
+        state.tick_multi(dt, &[Action::None; 3], &mut audio);
+        assert_eq!(
+            state.screen,
+            Screen::MatchResult(Some(0)),
+            "生き残ったホストが勝者として確定すること"
+        );
+    }
+
+    #[test]
     fn server_rejects_connections_beyond_the_configured_player_count() {
         // ホスト+1人の2人対戦なら、受け入れるクライアントは1人だけ。
         let server = server::spawn(0, 1).expect("bind an ephemeral port");

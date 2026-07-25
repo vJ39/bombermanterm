@@ -59,7 +59,7 @@ mod tests {
     #[test]
     fn build_canvas_produces_non_empty_output() {
         let canvas = build_canvas();
-        let lines = canvas.to_lines(1);
+        let lines = canvas.to_lines(1.0);
         assert!(!lines.is_empty());
     }
 }

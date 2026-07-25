@@ -3,13 +3,17 @@
 //! `aquaterm`(`src/framebuffer.rs`)の手法を踏襲する: 論理ピクセルを縦2つ1組にし、
 //! 上半分ブロック文字 `▀`(U+2580, fg=上ピクセル色, bg=下ピクセル色)で1端末セルに
 //! まとめて描画する。端末フォントは縦長なため、この方式で見た目がほぼ正方形の
-//! ピクセルになる。`scale` はズーム倍率で、1論理ピクセルを `scale × scale` 個の
-//! 疑似ピクセルとして最近傍拡大してから変換する。
+//! ピクセルになる。`scale` は最近傍サンプリングによる任意倍率(f32)で、
+//! 1.0より大きければ拡大、小さければ縮小になる(端末サイズへの自動フィットで
+//! 縮小が必要になるため、整数倍の拡大専用だった旧実装から拡張した)。
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use super::sprites::Sprite;
+
+/// これより小さい倍率は指定できない(0や負数だと出力ピクセル数が0になり得るため)。
+const MIN_SCALE: f32 = 0.05;
 
 /// 論理ピクセルグリッド。原点は左上、(x, y) は (列, 行)。
 pub struct PixelCanvas {
@@ -61,22 +65,25 @@ impl PixelCanvas {
         }
     }
 
-    /// `scale` 倍(1論理ピクセル→scale×scale)に最近傍拡大しつつ、
-    /// ハーフブロック文字でratatuiの `Line` 列に変換する。
-    pub fn to_lines(&self, scale: usize) -> Vec<Line<'static>> {
-        let scale = scale.max(1);
-        let scaled_width = self.width * scale;
-        let scaled_height = self.height * scale;
+    /// `scale` 倍(1論理ピクセル→約scale文字分)に最近傍サンプリングしつつ、
+    /// ハーフブロック文字でratatuiの `Line` 列に変換する。`scale` が1.0未満なら
+    /// 縮小(間引き)になる。
+    pub fn to_lines(&self, scale: f32) -> Vec<Line<'static>> {
+        let scale = scale.max(MIN_SCALE);
+        let scaled_width = ((self.width as f32) * scale).round().max(1.0) as usize;
+        let scaled_height = ((self.height as f32) * scale).round().max(1.0) as usize;
+        let max_x = self.width.saturating_sub(1);
+        let max_y = self.height.saturating_sub(1);
 
         let mut lines = Vec::with_capacity(scaled_height.div_ceil(2));
         let mut row = 0;
         while row < scaled_height {
-            let top_logical_y = row / scale;
-            let bottom_logical_y = (row + 1) / scale;
+            let top_logical_y = (((row as f32) / scale) as usize).min(max_y);
+            let bottom_logical_y = ((((row + 1) as f32) / scale) as usize).min(max_y);
 
             let mut spans = Vec::with_capacity(scaled_width);
             for col in 0..scaled_width {
-                let logical_x = col / scale;
+                let logical_x = (((col as f32) / scale) as usize).min(max_x);
                 let top = self.get(logical_x, top_logical_y);
                 let bottom = if row + 1 < scaled_height {
                     self.get(logical_x, bottom_logical_y)
@@ -115,14 +122,14 @@ mod tests {
     fn to_lines_pairs_rows_into_half_block_lines() {
         // 高さ2の単色キャンバスは1行のハーフブロック行にまとまるはず。
         let canvas = PixelCanvas::new(2, 2, Color::Rgb(9, 9, 9));
-        let lines = canvas.to_lines(1);
+        let lines = canvas.to_lines(1.0);
         assert_eq!(lines.len(), 1);
     }
 
     #[test]
     fn to_lines_handles_odd_height_by_reusing_top_pixel_for_the_last_row() {
         let canvas = PixelCanvas::new(1, 3, Color::Rgb(5, 5, 5));
-        let lines = canvas.to_lines(1);
+        let lines = canvas.to_lines(1.0);
         // height=3 -> ceil(3/2) = 2 行。
         assert_eq!(lines.len(), 2);
     }
@@ -130,9 +137,27 @@ mod tests {
     #[test]
     fn to_lines_scale_multiplies_output_dimensions() {
         let canvas = PixelCanvas::new(2, 2, Color::Rgb(1, 1, 1));
-        let lines = canvas.to_lines(3);
+        let lines = canvas.to_lines(3.0);
         // 幅方向: (2*3) = 6 スパン、高さ方向: ceil(2*3/2) = 3 行。
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].spans.len(), 6);
+    }
+
+    #[test]
+    fn to_lines_scale_below_one_shrinks_output_dimensions() {
+        // 20x20を0.5倍に縮小すると、幅は10スパン、高さはceil(10/2)=5行になる。
+        let canvas = PixelCanvas::new(20, 20, Color::Rgb(2, 2, 2));
+        let lines = canvas.to_lines(0.5);
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0].spans.len(), 10);
+    }
+
+    #[test]
+    fn to_lines_clamps_scale_below_the_minimum() {
+        // 極端に小さい倍率を渡しても、出力が0にならず必ず1行以上残る。
+        let canvas = PixelCanvas::new(50, 50, Color::Rgb(3, 3, 3));
+        let lines = canvas.to_lines(0.0);
+        assert!(!lines.is_empty());
+        assert!(!lines[0].spans.is_empty());
     }
 }

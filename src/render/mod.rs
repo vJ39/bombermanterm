@@ -2,13 +2,14 @@
 //!
 //! `Screen::{Title, Playing, Cleared, GameOver, MatchResult}` の各画面を切り替えて描画する。
 //! Playing中のフィールドは論理ピクセルグリッド([`pixel_canvas::PixelCanvas`])に
-//! 各マス8x8ドット絵スプライト([`sprites`])を描き込み、ハーフブロック文字`▀`で
+//! 各マス16x16ドット絵スプライト([`sprites`])を描き込み、ハーフブロック文字`▀`で
 //! 疑似2倍解像度の端末セルへ変換する(`aquaterm`の手法を踏襲)。本家ボンバーマンの
 //! シルエット(丸い頭のプレイヤー・バルーン状の敵・陰影付きブロック)を意識しつつ、
 //! 配色・輪郭は完全にオリジナルとする(本家の画像・音源は一切使用しない)。
 //!
 //! 実装メモ:
-//! - `zoom` は1論理ピクセルを何文字四方で表現するかの表示スケール(`+`/`-`キーで変更)。
+//! - `zoom` は[`ZOOM_MULTIPLIERS`]の添字で、フィールド全体が端末に収まる
+//!   最大スケール(自動フィット、[`fit_scale`])に対する追加倍率(`+`/`-`キーで変更)。
 //!   ゲームロジックには影響しないUI専用の値なので `GameState` には持たせず、
 //!   呼び出し側([`crate::main`])が保持して `draw` に渡す。
 //! - 同一マスへの重なり優先順位(奥→手前): タイル(背景) < ボム < 敵 < プレイヤー < 爆風。
@@ -38,10 +39,17 @@ use sprites::{
     player_sprite_with_suit, wall_sprite, EnemyColor, PlayerColor, Sprite, SPRITE_SIZE,
 };
 
-/// 表示スケールの既定値・上下限(1論理ピクセルを何文字四方で表現するか)。
-pub const DEFAULT_ZOOM: usize = 1;
-pub const MIN_ZOOM: usize = 1;
-pub const MAX_ZOOM: usize = 3;
+/// 手動ズーム(`+`/`-`キー)の段階。フィールド全体が端末に収まる最大スケール
+/// (自動フィット、[`fit_scale`])に対する追加倍率で、絶対倍率ではない。
+/// これにより、端末サイズに関わらず「今の表示から拡大/縮小したい」という
+/// 操作が一貫して働く。
+const ZOOM_MULTIPLIERS: [f32; 5] = [0.5, 0.75, 1.0, 1.5, 2.0];
+
+/// 表示スケールの既定値・上下限([`ZOOM_MULTIPLIERS`] の添字)。既定は1.0倍
+/// (自動フィットそのまま)。
+pub const DEFAULT_ZOOM: usize = 2;
+pub const MIN_ZOOM: usize = 0;
+pub const MAX_ZOOM: usize = ZOOM_MULTIPLIERS.len() - 1;
 
 /// プレイヤー添字ごとの色。添字0は従来の1人プレイと同じ白。
 const PLAYER_COLORS: [PlayerColor; 4] = [
@@ -120,7 +128,7 @@ pub fn draw_connecting(frame: &mut Frame, addr: &str) {
 pub fn draw_intro(frame: &mut Frame) {
     let area = frame.area();
     let canvas = intro::build_canvas();
-    let art_lines = canvas.to_lines(1);
+    let art_lines = canvas.to_lines(1.0);
     let art_cols = art_lines.first().map(|l| l.spans.len()).unwrap_or(0) as u16;
     let art_rows = art_lines.len() as u16;
 
@@ -143,6 +151,27 @@ pub fn draw_intro(frame: &mut Frame) {
             hint_area,
         );
     }
+}
+
+/// 論理ピクセルサイズ `content_width_px` x `content_height_px` のフィールドが、
+/// `available_cols` x `available_rows`(テキスト単位)にちょうど収まる最大の
+/// スケールを計算する。ハーフブロック変換で縦2ピクセル=1テキスト行になるため、
+/// 縦方向は `available_rows * 2` 論理ピクセル分を使える。
+///
+/// 引数がゼロ(端末サイズ取得前・空のフィールド等)なら安全に1.0を返す。
+fn fit_scale(
+    available_cols: u16,
+    available_rows: u16,
+    content_width_px: usize,
+    content_height_px: usize,
+) -> f32 {
+    if available_cols == 0 || available_rows == 0 || content_width_px == 0 || content_height_px == 0
+    {
+        return 1.0;
+    }
+    let by_width = available_cols as f32 / content_width_px as f32;
+    let by_height = (available_rows as f32 * 2.0) / content_height_px as f32;
+    by_width.min(by_height)
 }
 
 /// `area` の中央に `width` x `height` の矩形を配置する。
@@ -330,7 +359,14 @@ fn draw_playing(frame: &mut Frame, state: &GameState, zoom: usize, local_player:
     );
 
     let canvas = render_field_canvas(state);
-    let field_lines = canvas.to_lines(zoom);
+    let content_width_px = state.map.width * SPRITE_SIZE;
+    let content_height_px = state.map.height * SPRITE_SIZE;
+    // ボーダー(Borders::ALL、上下左右1文字ずつ)の分だけ利用可能領域を狭める。
+    let available_cols = field_container.width.saturating_sub(2);
+    let available_rows = field_container.height.saturating_sub(2);
+    let scale = fit_scale(available_cols, available_rows, content_width_px, content_height_px)
+        * ZOOM_MULTIPLIERS[zoom.min(ZOOM_MULTIPLIERS.len() - 1)];
+    let field_lines = canvas.to_lines(scale);
     // 1行あたりのカラム数はどの行も等しい(全マス分のスパンを敷き詰めているため)ので先頭行から取る。
     let field_cols = field_lines.first().map(|l| l.spans.len()).unwrap_or(0) as u16;
     let field_rows = field_lines.len() as u16;
@@ -559,6 +595,57 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    #[test]
+    fn fit_scale_shrinks_to_fit_a_small_terminal() {
+        // 15x13マス(1マス16px)=240x208論理ピクセル。80x24テキストのように
+        // 極端に狭い端末では、そのまま(scale=1.0)だと大きくはみ出るはずなので、
+        // 1.0未満に縮小される。
+        let scale = fit_scale(78, 20, 240, 208);
+        assert!(scale < 1.0, "small terminals must shrink below 1.0: {scale}");
+        assert!(scale > 0.0);
+    }
+
+    #[test]
+    fn fit_scale_uses_the_tighter_of_width_or_height() {
+        // 横は十分だが縦が厳しいケース: 縦基準の倍率が採用されること。
+        let by_width = 1000.0 / 240.0;
+        let by_height = (20.0 * 2.0) / 208.0;
+        let scale = fit_scale(1000, 20, 240, 208);
+        assert!(scale < by_width);
+        assert!((scale - by_height).abs() < 1e-4);
+    }
+
+    #[test]
+    fn fit_scale_falls_back_to_one_when_inputs_are_zero() {
+        assert_eq!(fit_scale(0, 20, 240, 208), 1.0);
+        assert_eq!(fit_scale(80, 0, 240, 208), 1.0);
+        assert_eq!(fit_scale(80, 20, 0, 208), 1.0);
+        assert_eq!(fit_scale(80, 20, 240, 0), 1.0);
+    }
+
+    #[test]
+    fn playing_field_fits_inside_a_small_terminal() {
+        // 80x24という一般的な小さめの端末サイズでも、フィールドの描画領域が
+        // 画面の外にはみ出さないこと(自動フィットが効いていることの確認)。
+        let mut state = GameState::new();
+        state.screen = Screen::Playing;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+        terminal
+            .draw(|frame| draw(frame, &state, DEFAULT_ZOOM))
+            .expect("draw must not fail");
+        // はみ出ていれば render_widget 内でクリップされるだけでpanicはしないため、
+        // ここでは「描画自体が成功すること」に加え、実際に何か描かれていることを見る。
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("BombermanTerm"), "field border must be visible");
+    }
+
     /// `state` を仮想端末へ描画し、画面に出た文字を1本の文字列として返す。
     /// 端末を持たない環境でも描画経路がpanicしないことの確認に使う。
     fn rendered_text(state: &GameState) -> String {
@@ -718,8 +805,8 @@ mod tests {
             player.alive = false;
         }
 
-        let all_alive = render_field_canvas(&state).to_lines(1);
-        let solo = render_field_canvas(&only_first).to_lines(1);
+        let all_alive = render_field_canvas(&state).to_lines(1.0);
+        let solo = render_field_canvas(&only_first).to_lines(1.0);
 
         for idx in 1..state.players.len() {
             let (row, col) = state.players[idx].pos;

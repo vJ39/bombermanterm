@@ -75,10 +75,16 @@ pub enum Bgm {
 }
 
 /// ゲーム全体の画面状態。
+///
+/// CONTRACT CHANGE: `MatchResult` を追加。複数プレイヤー対戦
+/// (`GameState::new_multiplayer`)の決着画面で、`Some(index)` は勝者となった
+/// プレイヤーの `GameState::players` 内の添字、`None` は全滅による引き分けを表す。
+/// 1人プレイ+CPU戦は従来どおり `Cleared` / `GameOver` を使い、この状態にはならない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Title,
     Playing,
     Cleared,
     GameOver,
+    MatchResult(Option<usize>),
 }

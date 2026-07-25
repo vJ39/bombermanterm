@@ -1,6 +1,6 @@
 //! ratatui描画。
 //!
-//! `Screen::{Title, Playing, Cleared, GameOver}` の4画面を切り替えて描画する。
+//! `Screen::{Title, Playing, Cleared, GameOver, MatchResult}` の各画面を切り替えて描画する。
 //! Playing中のフィールドは論理ピクセルグリッド([`pixel_canvas::PixelCanvas`])に
 //! 各マス8x8ドット絵スプライト([`sprites`])を描き込み、ハーフブロック文字`▀`で
 //! 疑似2倍解像度の端末セルへ変換する(`aquaterm`の手法を踏襲)。本家ボンバーマンの
@@ -13,6 +13,8 @@
 //!   呼び出し側([`crate::main`])が保持して `draw` に渡す。
 //! - 同一マスへの重なり優先順位(奥→手前): タイル(背景) < ボム < 敵 < プレイヤー < 爆風。
 //!   爆風は演出上もっとも目立たせたいため最前面に描画する。
+//! - `GameState::players` は複数人を持てるが、この描画は1人プレイ向けのままで
+//!   先頭のプレイヤー(プレイヤー0)だけを描く。複数人の同時描画は次フェーズで対応する。
 
 mod pixel_canvas;
 mod sprites;
@@ -44,6 +46,7 @@ pub fn draw(frame: &mut Frame, state: &GameState, zoom: usize) {
         Screen::Playing => draw_playing(frame, state, zoom),
         Screen::Cleared => draw_result(frame, state, true),
         Screen::GameOver => draw_result(frame, state, false),
+        Screen::MatchResult(winner) => draw_match_result(frame, winner),
     }
 }
 
@@ -109,7 +112,7 @@ fn draw_playing(frame: &mut Frame, state: &GameState, zoom: usize) {
 
     let status = Line::from(vec![
         Span::styled(
-            format!(" SCORE {:06} ", state.score),
+            format!(" SCORE {:06} ", state.score()),
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
@@ -117,7 +120,7 @@ fn draw_playing(frame: &mut Frame, state: &GameState, zoom: usize) {
         ),
         Span::raw("  "),
         Span::styled(
-            format!(" LIVES {} ", state.lives),
+            format!(" LIVES {} ", state.lives()),
             Style::default()
                 .fg(Color::White)
                 .bg(Color::Red)
@@ -168,8 +171,8 @@ fn draw_result(frame: &mut Frame, state: &GameState, cleared: bool) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(format!("SCORE: {:06}", state.score)),
-        Line::from(format!("LIVES: {}", state.lives)),
+        Line::from(format!("SCORE: {:06}", state.score())),
+        Line::from(format!("LIVES: {}", state.lives())),
         Line::from(""),
         Line::from(Span::styled(
             "[ SPACE ] タイトルへ    [ Esc / q ] 終了",
@@ -186,6 +189,43 @@ fn draw_result(frame: &mut Frame, state: &GameState, cleared: bool) {
         .block(block);
 
     let box_area = centered_rect(46, 10, area);
+    frame.render_widget(paragraph, box_area);
+}
+
+/// 複数プレイヤー対戦の決着画面。`winner` が `None` なら相打ちの引き分け。
+fn draw_match_result(frame: &mut Frame, winner: Option<usize>) {
+    let area = frame.area();
+
+    let (headline, headline_color) = match winner {
+        // プレイヤー番号は内部の添字が0起点なので、表示は1起点にする。
+        Some(idx) => (format!("PLAYER {} WINS!", idx + 1), Color::LightGreen),
+        None => ("DRAW".to_string(), Color::LightYellow),
+    };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            headline,
+            Style::default()
+                .fg(headline_color)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[ SPACE ] タイトルへ    [ Esc / q ] 終了",
+            Style::default().fg(Color::Gray),
+        )),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(headline_color));
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .alignment(Alignment::Center)
+        .block(block);
+
+    let box_area = centered_rect(46, 8, area);
     frame.render_widget(paragraph, box_area);
 }
 
@@ -226,8 +266,12 @@ fn render_field_canvas(state: &GameState) -> PixelCanvas {
                 canvas.blit_sprite(ox, oy, &enemy_sprite(enemy_color(enemy.kind)));
             }
 
-            if state.player.alive && state.player.pos == pos {
-                canvas.blit_sprite(ox, oy, &player_sprite_for(&state.player));
+            // 1人プレイ向けの描画のため、先頭のプレイヤーだけを描く。
+            if let Some(player) = state.players.first()
+                && player.alive
+                && player.pos == pos
+            {
+                canvas.blit_sprite(ox, oy, &player_sprite_for(player));
             }
 
             if state
@@ -296,5 +340,87 @@ fn enemy_color(kind: EnemyKind) -> EnemyColor {
         EnemyKind::Wander => EnemyColor::Magenta,
         EnemyKind::Chaser => EnemyColor::Red,
         EnemyKind::Avoider => EnemyColor::Blue,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::state::GameState;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// `state` を仮想端末へ描画し、画面に出た文字を1本の文字列として返す。
+    /// 端末を持たない環境でも描画経路がpanicしないことの確認に使う。
+    fn rendered_text(state: &GameState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| draw(frame, state, DEFAULT_ZOOM))
+            .expect("draw must not fail");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn playing_hud_shows_player_zero_score_and_lives() {
+        let mut state = GameState::new();
+        state.screen = Screen::Playing;
+        state.players[0].score = 1250;
+        state.players[0].lives = 2;
+
+        let text = rendered_text(&state);
+        assert!(
+            text.contains("SCORE 001250"),
+            "HUD must show player 0 score"
+        );
+        assert!(text.contains("LIVES 2"), "HUD must show player 0 lives");
+    }
+
+    #[test]
+    fn every_screen_renders_without_panicking() {
+        let mut state = GameState::new();
+
+        for screen in [
+            Screen::Title,
+            Screen::Playing,
+            Screen::Cleared,
+            Screen::GameOver,
+        ] {
+            state.screen = screen;
+            let text = rendered_text(&state);
+            assert!(!text.trim().is_empty(), "{screen:?} must draw something");
+        }
+
+        assert!(rendered_text(&state).contains("GAME OVER"));
+        state.screen = Screen::Cleared;
+        assert!(rendered_text(&state).contains("STAGE CLEAR!"));
+    }
+
+    #[test]
+    fn match_result_screen_shows_the_winner_or_a_draw() {
+        let mut state = GameState::new();
+
+        // 表示は1起点にするので、添字1のプレイヤーは "PLAYER 2"。
+        state.screen = Screen::MatchResult(Some(1));
+        assert!(rendered_text(&state).contains("PLAYER 2 WINS!"));
+
+        state.screen = Screen::MatchResult(None);
+        assert!(rendered_text(&state).contains("DRAW"));
+    }
+
+    #[test]
+    fn playing_field_renders_with_multiple_players_present() {
+        // 複数人の同時描画は次フェーズだが、`players` が複数あっても
+        // 描画経路がpanicしない(先頭のプレイヤーを描く)ことを確認する。
+        let mut state = GameState::new_multiplayer(4);
+        state.screen = Screen::Playing;
+
+        let text = rendered_text(&state);
+        assert!(text.contains("SCORE 000000"));
     }
 }

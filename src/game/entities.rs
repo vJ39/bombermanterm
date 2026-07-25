@@ -19,6 +19,17 @@ pub struct Player {
     /// 隠しコマンド(`god`)でON/OFFする、時間制限の無い強制無敵モード。
     /// CONTRACT CHANGE: `Action::ToggleGodMode` 対応のため追加したフィールド。
     pub god_mode: bool,
+    /// このプレイヤーが次に1マス移動できるまでの残り秒数。0以下で移動可能。
+    /// CONTRACT CHANGE: 複数プレイヤー対応のため追加したフィールド。
+    /// 以前は `GameState` の非公開フィールド `player_move_cooldown` として
+    /// 単一プレイヤー分だけ持っていたものを、プレイヤーごとに持たせた。
+    pub move_cooldown: f32,
+    /// 残機。0になった状態で死亡すると復活しない。
+    /// CONTRACT CHANGE: 複数プレイヤー対応のため `GameState::lives` から移設。
+    pub lives: u32,
+    /// このプレイヤーの得点。
+    /// CONTRACT CHANGE: 複数プレイヤー対応のため `GameState::score` から移設。
+    pub score: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +47,11 @@ pub struct Enemy {
 
 pub struct Bomb {
     pub pos: Coord,
-    pub owner_is_player: bool,
+    /// 設置したプレイヤーの `GameState::players` 内の添字。
+    /// CONTRACT CHANGE: 複数プレイヤー対応のため `owner_is_player: bool` から変更。
+    /// 「誰のボムか」を1人プレイ前提の真偽値ではなくプレイヤー添字で表す
+    /// (設置数上限のカウントと、撃破スコアの帰属先の判定に使う)。
+    pub owner: usize,
     pub timer: f32,
     pub power: u32,
 }
@@ -48,6 +63,11 @@ pub struct Explosion {
 
 /// ボムの初期タイマー(秒)。仕様に明記が無いためここで既定値を持つ。
 const DEFAULT_BOMB_TIMER: f32 = 3.0;
+
+/// プレイヤー1人あたりの開始時の残機数。
+/// `Player::lives` の初期値と `GameState` 側の初期化で同じ値を使うため、
+/// 定数の実体はここ(`Player` の定義側)に一本化する。
+pub const STARTING_LIVES: u32 = 3;
 
 /// 爆風が画面に残る時間(秒)。
 const DEFAULT_EXPLOSION_DURATION: f32 = 0.5;
@@ -116,6 +136,9 @@ impl Player {
             alive: true,
             invincible_remaining: 0.0,
             god_mode: false,
+            move_cooldown: 0.0,
+            lives: STARTING_LIVES,
+            score: 0,
         }
     }
 
@@ -162,10 +185,10 @@ impl Enemy {
 }
 
 impl Bomb {
-    pub fn new(pos: Coord, power: u32, owner_is_player: bool) -> Self {
+    pub fn new(pos: Coord, power: u32, owner: usize) -> Self {
         Self {
             pos,
-            owner_is_player,
+            owner,
             timer: DEFAULT_BOMB_TIMER,
             power,
         }
@@ -314,6 +337,12 @@ mod tests {
         assert!(player.speed > 0.0);
         assert!(!player.god_mode);
         assert!(!player.is_invincible());
+        assert_eq!(
+            player.move_cooldown, 0.0,
+            "a fresh player must be able to move immediately"
+        );
+        assert_eq!(player.lives, STARTING_LIVES);
+        assert_eq!(player.score, 0);
     }
 
     #[test]
@@ -339,11 +368,15 @@ mod tests {
 
     #[test]
     fn bomb_new_keeps_given_fields_and_has_positive_timer() {
-        let bomb = Bomb::new((4, 4), 2, true);
+        let bomb = Bomb::new((4, 4), 2, 0);
         assert_eq!(bomb.pos, (4, 4));
         assert_eq!(bomb.power, 2);
-        assert!(bomb.owner_is_player);
+        assert_eq!(bomb.owner, 0);
         assert!(bomb.timer > 0.0);
+
+        // 所有者は添字なので、プレイヤー0以外も保持できる。
+        let bomb = Bomb::new((4, 4), 2, 3);
+        assert_eq!(bomb.owner, 3);
     }
 
     #[test]

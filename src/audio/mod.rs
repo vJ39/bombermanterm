@@ -94,12 +94,14 @@ impl AudioPlayer for RodioPlayer {
             Bgm::Title => {
                 let lead = Sequencer::new(title_lead()).repeat_infinite();
                 let bass = Sequencer::new(title_bass()).repeat_infinite();
-                output.bgm_player.append(lead.mix(bass));
+                let drums = Sequencer::new(title_drums()).repeat_infinite();
+                output.bgm_player.append(lead.mix(bass).mix(drums));
             }
             Bgm::Stage => {
                 let lead = Sequencer::new(stage_lead()).repeat_infinite();
                 let bass = Sequencer::new(stage_bass()).repeat_infinite();
-                output.bgm_player.append(lead.mix(bass));
+                let drums = Sequencer::new(stage_drums()).repeat_infinite();
+                output.bgm_player.append(lead.mix(bass).mix(drums));
             }
             Bgm::Clear => {
                 output
@@ -197,6 +199,15 @@ fn title_chorus_bass() -> Vec<Note> {
     vec![n(F, 3), n(G, 3)]
 }
 
+/// タイトルBGMの控えめなハイハット(8分音符)。本家のような軽快な弾みを
+/// 待機ループにも少しだけ加える。verse/chorus合わせて `title_lead()` と
+/// 同じ長さになるよう、0.08秒刻み×(32+16)個で組む。
+fn title_drums() -> Vec<Note> {
+    let mut notes = hi_hat_pattern(32, 0.08, 0.10, 0.05);
+    notes.extend(hi_hat_pattern(16, 0.08, 0.10, 0.05));
+    notes
+}
+
 /// ステージBGM: 走り回る緊張感のある駆け足ループ(リード+ベースの2声)。
 /// Aメロ→サビの2部構成で、サビはより高いキー・大きい音量で盛り上げる。
 fn stage_lead() -> Vec<Note> {
@@ -267,6 +278,41 @@ fn stage_chorus_bass() -> Vec<Note> {
     vec![n(D, 3), n(F, 3), n(G, 3), n(A, 3)]
 }
 
+/// ステージBGMのドラムパート。本家のような走り回る軽快さを出す本命の要素で、
+/// 8分音符のハイハットに2拍ごとスネア風のアクセントを挟む。
+/// verse(32個)+chorus(16個)を0.07秒刻みで組み、`stage_lead()`と同じ長さにする。
+fn stage_drums() -> Vec<Note> {
+    let mut notes = snare_accented_hat_pattern(32, 0.07, 0.18, 0.09);
+    notes.extend(snare_accented_hat_pattern(16, 0.07, 0.20, 0.10));
+    notes
+}
+
+/// シンプルな8分音符ハイハット(表拍を強め、裏拍を弱めに)を `count` 個刻む。
+fn hi_hat_pattern(count: usize, step: f32, strong_vol: f32, weak_vol: f32) -> Vec<Note> {
+    use Waveform::Noise;
+    (0..count)
+        .map(|i| {
+            let vol = if i % 2 == 0 { strong_vol } else { weak_vol };
+            Note::tone(5200.0, step, Noise, vol)
+        })
+        .collect()
+}
+
+/// ハイハットの合間に2拍ごと(4ステップごと)スネア風の低めのノイズを挟むパターン。
+fn snare_accented_hat_pattern(count: usize, step: f32, hat_vol: f32, snare_vol: f32) -> Vec<Note> {
+    use Waveform::Noise;
+    (0..count)
+        .map(|i| {
+            if i % 4 == 2 {
+                Note::tone(1400.0, step, Noise, snare_vol)
+            } else {
+                let vol = if i % 2 == 0 { hat_vol } else { hat_vol * 0.5 };
+                Note::tone(5200.0, step, Noise, vol)
+            }
+        })
+        .collect()
+}
+
 /// ステージクリアBGM: 短い勝利のファンファーレの繰り返し。
 fn clear_notes() -> Vec<Note> {
     use Waveform::Square;
@@ -310,12 +356,14 @@ fn se_notes(se: SoundEffect) -> Vec<Note> {
             Note::tone(1600.0, 0.07, Noise, 0.75),
             Note::tone(900.0, 0.09, Noise, 0.55),
             Note::tone(450.0, 0.14, Noise, 0.35),
+            // 本家の爆発音を意識した低音の余韻(ドン、と尾を引く感じ)。
+            Note::tone(140.0, 0.20, Noise, 0.30),
         ],
         SoundEffect::ItemGet => vec![
-            Note::tone(hz(C, 5), 0.05, Square, 0.42),
-            Note::tone(hz(E, 5), 0.05, Square, 0.42),
-            Note::tone(hz(G, 5), 0.05, Square, 0.42),
-            Note::tone(hz(C, 6), 0.09, Square, 0.45),
+            Note::tone(hz(C, 5), 0.04, Square, 0.42),
+            Note::tone(hz(E, 5), 0.04, Square, 0.42),
+            Note::tone(hz(G, 5), 0.04, Square, 0.42),
+            Note::tone(hz(C, 6), 0.07, Square, 0.45),
         ],
         SoundEffect::Death => vec![
             Note::tone(hz(A, 4), 0.08, Square, 0.50),
@@ -377,6 +425,26 @@ mod tests {
     }
 
     #[test]
+    fn title_drums_length_matches_lead() {
+        let lead = total_secs(title_lead());
+        let drums = total_secs(title_drums());
+        assert!(
+            (lead - drums).abs() < 0.01,
+            "lead={lead} drums={drums} must match so the loop seam is clean"
+        );
+    }
+
+    #[test]
+    fn stage_drums_length_matches_lead() {
+        let lead = total_secs(stage_lead());
+        let drums = total_secs(stage_drums());
+        assert!(
+            (lead - drums).abs() < 0.01,
+            "lead={lead} drums={drums} must match so the loop seam is clean"
+        );
+    }
+
+    #[test]
     fn every_bgm_and_se_definition_is_non_empty() {
         for se in ALL_SOUND_EFFECTS {
             assert!(!se_notes(se).is_empty());
@@ -385,8 +453,10 @@ mod tests {
         assert!(!gameover_notes().is_empty());
         assert!(!title_lead().is_empty());
         assert!(!title_bass().is_empty());
+        assert!(!title_drums().is_empty());
         assert!(!stage_lead().is_empty());
         assert!(!stage_bass().is_empty());
+        assert!(!stage_drums().is_empty());
     }
 
     /// 実デバイスの有無どちらでもパニックしないこと(CI/ヘッドレス環境向けの

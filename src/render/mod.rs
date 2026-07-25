@@ -21,6 +21,7 @@
 //!   ローカル1人プレイは従来どおり [`draw`](自分の番号を指定しない)を使う。
 
 mod intro;
+mod menu;
 mod pixel_canvas;
 mod sprites;
 
@@ -34,6 +35,9 @@ use crate::game::entities::EnemyKind;
 use crate::game::state::GameState;
 use crate::types::{Coord, Screen, Tile};
 use pixel_canvas::PixelCanvas;
+// 起動メニューの描画は `menu` サブモジュールに置き、呼び出し側からは
+// `draw_intro` 等と同じ `render::` 直下の関数として見えるようにする。
+pub(crate) use menu::{draw_host_setup, draw_join_input, draw_mode_select};
 use sprites::{
     block_sprite, bomb_sprite, enemy_sprite, explosion_sprite, item_sprite, player_sprite,
     player_sprite_with_suit, wall_sprite, EnemyColor, PlayerColor, Sprite, SPRITE_SIZE,
@@ -64,7 +68,7 @@ const PLAYER_COLORS: [PlayerColor; 4] = [
 /// ローカル1人プレイ向けの入口。ネットワーク対戦では
 /// [`draw_with_perspective`] に自分のプレイヤー番号を渡す。
 pub fn draw(frame: &mut Frame, state: &GameState, zoom: usize) {
-    draw_with_perspective(frame, state, zoom, None);
+    draw_with_perspective(frame, state, zoom, None, None);
 }
 
 /// 「画面を見ている人がどのプレイヤーか」を踏まえて描画する。
@@ -72,18 +76,22 @@ pub fn draw(frame: &mut Frame, state: &GameState, zoom: usize) {
 /// `local_player` は `GameState::players` 内の自分の添字。ネットワーク対戦で
 /// 4人が同じ盤面を見るため、HUDで自分の色・番号が分かるようにする。
 /// `None` はローカル1人プレイ(自分が誰かを示す必要が無い)。
+///
+/// `host_addr` は自分が待ち受けているアドレス。ホスト(`local_player == Some(0)`)の
+/// ロビー画面にだけ出して、参加者へ伝える接続先をTUIの中で確認できるようにする。
 pub fn draw_with_perspective(
     frame: &mut Frame,
     state: &GameState,
     zoom: usize,
     local_player: Option<usize>,
+    host_addr: Option<&str>,
 ) {
     match state.screen {
         Screen::Title => draw_title(frame),
         Screen::Lobby {
             connected,
             required,
-        } => draw_lobby(frame, connected, required, local_player),
+        } => draw_lobby(frame, connected, required, local_player, host_addr),
         Screen::Playing => draw_playing(frame, state, zoom, local_player),
         Screen::Cleared => draw_result(frame, state, true),
         Screen::GameOver => draw_result(frame, state, false),
@@ -231,9 +239,15 @@ fn draw_title(frame: &mut Frame) {
 /// ネットワーク対戦の参加者待ち画面。
 ///
 /// 凝った演出は置かず、参加人数と開始操作の案内だけを出す。ホスト
-/// (`local_player == Some(0)`)には開始キーの案内を、クライアントには
-/// ホスト待ちであることを表示する。
-fn draw_lobby(frame: &mut Frame, connected: usize, required: usize, local_player: Option<usize>) {
+/// (`local_player == Some(0)`)には開始キーの案内と自分の待ち受けアドレスを、
+/// クライアントにはホスト待ちであることを表示する。
+fn draw_lobby(
+    frame: &mut Frame,
+    connected: usize,
+    required: usize,
+    local_player: Option<usize>,
+    host_addr: Option<&str>,
+) {
     let is_host = local_player == Some(0);
     let ready = connected >= required;
 
@@ -267,6 +281,17 @@ fn draw_lobby(frame: &mut Frame, connected: usize, required: usize, local_player
                 if is_host { " (ホスト)" } else { "" }
             ),
             Style::default().fg(player_hud_color(idx)),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    // 接続先はホストが参加者へ伝える情報なので、クライアント側には出さない。
+    if let (true, Some(addr)) = (is_host, host_addr) {
+        lines.push(Line::from(Span::styled(
+            format!("接続先: {addr}"),
+            Style::default()
+                .fg(Color::LightYellow)
+                .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
     }
@@ -588,6 +613,20 @@ fn enemy_color(kind: EnemyKind) -> EnemyColor {
     }
 }
 
+/// テスト用: 端末バッファから拾った文字列に `needle` が現れるか。
+/// メニューの描画テスト(`render::menu`)からも使う。
+///
+/// 全角文字は端末セル2つ分を占め、続きのセルには埋め合わせの空白が入る。
+/// そのためセルの文字を素に連結すると日本語は「一 文 字 ず つ」に割れて見え、
+/// `str::contains` では一致しない。突き合わせる前に両方から空白を落とす。
+#[cfg(test)]
+fn contains_text(rendered: &str, needle: &str) -> bool {
+    fn squash(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+    squash(rendered).contains(&squash(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,9 +763,20 @@ mod tests {
 
     /// `state` を自分のプレイヤー番号付きで描画し、画面の文字列を返す。
     fn rendered_text_as(state: &GameState, local_player: Option<usize>) -> String {
+        rendered_text_as_with_addr(state, local_player, None)
+    }
+
+    /// `state` を自分のプレイヤー番号と待ち受けアドレス付きで描画し、画面の文字列を返す。
+    fn rendered_text_as_with_addr(
+        state: &GameState,
+        local_player: Option<usize>,
+        host_addr: Option<&str>,
+    ) -> String {
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
         terminal
-            .draw(|frame| draw_with_perspective(frame, state, DEFAULT_ZOOM, local_player))
+            .draw(|frame| {
+                draw_with_perspective(frame, state, DEFAULT_ZOOM, local_player, host_addr)
+            })
             .expect("draw must not fail");
         terminal
             .backend()
@@ -849,6 +899,26 @@ mod tests {
         let client_view = rendered_text_as(&state, Some(2));
         assert!(!client_view.contains("SPACE"), "クライアントは開始できない");
         assert!(client_view.contains("PLAYER 3"));
+    }
+
+    #[test]
+    fn lobby_shows_the_listening_address_to_the_host_only() {
+        let mut state = GameState::new_multiplayer(2);
+        state.enter_lobby(2);
+        state.set_lobby_connected(1);
+
+        let host_view = rendered_text_as_with_addr(&state, Some(0), Some("192.168.1.10:4321"));
+        assert!(
+            contains_text(&host_view, "接続先: 192.168.1.10:4321"),
+            "ホストのロビーに接続先が出ること: {host_view}"
+        );
+
+        // クライアントは接続先を伝える側ではないので出さない。
+        let client_view = rendered_text_as_with_addr(&state, Some(1), Some("192.168.1.10:4321"));
+        assert!(!client_view.contains("192.168.1.10:4321"));
+
+        // アドレス未指定なら従来どおり接続先の行は出ない。
+        assert!(!contains_text(&rendered_text_as(&state, Some(0)), "接続先"));
     }
 
     #[test]

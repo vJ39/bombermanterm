@@ -67,10 +67,10 @@ src/
   - `ServerMessage::PlayerLeft { player_id }` — 切断の通知
   - 当初案から変更した点: 描画用の別型`GameStateSnapshot`は作らず`GameState`をまるごと送る（同じ状態を二重に定義・保守しなくてよいため）。`ClientMessage::Ready`と`ServerMessage::PlayerJoined`は作っていない（開始判断はホストのみ、参加人数はスナップショットの`Screen::Lobby`で全員に届くため不要）
 - スレッド構成: **tokioはネットワーク専用スレッドの中だけで動かし、メインループ(crossterm+ratatui)は同期のまま**にする。両者の橋渡しは`std::sync::mpsc`で行う。ゲームロジック(`GameState::tick_multi`)を呼ぶのはホストのメインスレッドで、`net::server`は入力の集約とスナップショットの中継に徹する（既存のメインループを非同期化せずに済ませるため）
-- 起動モード（CLI引数、`clap`使用）:
-  - `bombermanterm` … 従来通りローカル1人+CPU
-  - `bombermanterm host --port <PORT> [--players <N>]` … ホスト(サーバー兼プレイヤー)として起動、他プレイヤーの接続を待つ。`N`は2〜4(既定3)
-  - `bombermanterm join <ADDR>` … クライアントとして接続。`ADDR`は`host:port`形式（当初案の`join <ADDR> --port <PORT>`から変更）
+- 起動モード（CLI引数、`clap`使用。いずれもオプション、指定しなければゲーム内メニューに入る）:
+  - `bombermanterm` … イントロのあと、ゲーム内のモード選択メニュー（`src/menu.rs`、`GameState`に非依存の独立画面）で「1人プレイ」「ホストになる」「参加する」を選ぶ。ホストは対戦人数(2〜4、既定3)を、参加者は接続先アドレスをその場で入力する。待ち受け/接続に失敗しても終了せず、入力内容とエラー理由を保ったままメニューへ戻る
+  - `bombermanterm host --port <PORT> [--players <N>]` … メニューを介さない近道。ホスト(サーバー兼プレイヤー)として起動、他プレイヤーの接続を待つ。`N`は2〜4(既定3)
+  - `bombermanterm join <ADDR>` … メニューを介さない近道。クライアントとして接続。`ADDR`は`host:port`形式（当初案の`join <ADDR> --port <PORT>`から変更）
 - ロビー画面: 参加人数を表示し、必要人数が揃った状態でホストがSPACEを押すとゲーム開始（新規`Screen::Lobby { connected, required }`）。クライアントはこの画面もスナップショットとして受け取って描画する
 - 切断耐性: v2の初期実装では「切断されたプレイヤーはその場でリタイア扱い(以降の入力は無し)」に留め、再接続は将来拡張
 

@@ -7,9 +7,12 @@
 //! `Action::Quit` でループを抜けて端末状態を復元する。
 //!
 //! 起動モードは3つ(`clap` でパース):
-//! - 引数なし … 従来どおりローカル1人プレイ+CPU敵([`run_local`])
+//! - 引数なし … イントロのあとゲーム内のモード選択メニュー([`menu`])を出し、
+//!   選ばれたモードをそのまま起動する([`run_menu_then_launch`])
 //! - `host` … サーバー兼プレイヤー。ゲームロジックを回すのはこのモードだけ([`run_host`])
 //! - `join` … クライアント。入力を送り、届いた状態を描画するだけ([`run_client`])
+//!
+//! `host` / `join` はメニューを介さない近道として残してある。
 //!
 //! ネットワーク対戦でも**メインループはこれまで通り同期**のまま。tokioは
 //! [`net`] 側が起動する専用スレッドの中だけで動き、`std::sync::mpsc` で橋渡しする。
@@ -17,6 +20,7 @@
 mod audio;
 mod game;
 mod input;
+mod menu;
 mod net;
 mod render;
 mod types;
@@ -29,6 +33,7 @@ use clap::{Parser, Subcommand};
 use audio::{AudioPlayer, RodioPlayer};
 use game::state::{GameState, MAX_PLAYERS, MIN_MULTIPLAYER_PLAYERS};
 use input::{InputSource, KeyboardInput};
+use menu::{LaunchChoice, MenuOutcome, MenuState};
 use net::client::ClientHandle;
 use net::server::ServerHandle;
 use types::{Action, Bgm};
@@ -69,10 +74,11 @@ enum Mode {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    // ネットワークの準備(bind / connect)はTUIを起動する前に済ませる。
-    // 失敗した場合、代替画面へ切り替える前なのでエラーがそのまま端末に残る。
+    // サブコマンド経路では、ネットワークの準備(bind / connect)をTUIを起動する
+    // 前に済ませる。失敗した場合、代替画面へ切り替える前なのでエラーがそのまま
+    // 端末に残る(メニュー経路は端末を切り替えた後なので、画面内で伝える)。
     match cli.mode {
-        None => with_terminal(run_local),
+        None => with_terminal(run_menu_then_launch),
         Some(Mode::Host { port, players }) => {
             let players = usize::from(players);
             let server = net::server::spawn(port, players - 1)?;
@@ -163,13 +169,60 @@ fn show_intro(terminal: &mut ratatui::DefaultTerminal, input: &mut KeyboardInput
     }
 }
 
-/// ローカル1人プレイ+CPU敵(引数なしで起動したときの従来の経路)。
-fn run_local(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
+/// 引数なしで起動したときの経路。イントロ → モード選択メニュー → 選ばれた
+/// モードのメインループ、を1つの端末セッションの中で回す。
+///
+/// ネットワークの準備(bind / connect)に失敗しても終了はせず、理由を添えて
+/// メニューへ戻す。ここは既に代替画面へ切り替えた後で、端末へ書いたエラーは
+/// ユーザーに読まれないため。
+fn run_menu_then_launch(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     let mut input = KeyboardInput::new();
     if !show_intro(terminal, &mut input)? {
         return Ok(()); // イントロ画面でQuitされた。
     }
 
+    let mut outcome = menu::run(terminal)?;
+
+    loop {
+        let choice = match outcome {
+            MenuOutcome::Quit => return Ok(()),
+            MenuOutcome::Launch(choice) => choice,
+        };
+
+        // 準備できたモードはそのまま起動して戻らない。失敗したモードだけ、
+        // 設定内容を保ったままメニューへ差し戻す。
+        let retry = match choice {
+            LaunchChoice::Local => return run_local(terminal),
+            LaunchChoice::Host { players } => {
+                match net::server::spawn(net::DEFAULT_PORT, players - 1) {
+                    Ok(server) => return run_host(terminal, server, players),
+                    // 理由(OSのエラー文)は長いので改行して別行に出す。
+                    Err(err) => MenuState::HostSetup {
+                        players,
+                        error: Some(format!(
+                            "ポート {} で待ち受けられません\n({err})",
+                            net::DEFAULT_PORT
+                        )),
+                    },
+                }
+            }
+            LaunchChoice::Join { addr } => match net::client::spawn(&addr) {
+                Ok(client) => return run_client(terminal, client, &addr),
+                Err(err) => MenuState::JoinInput {
+                    addr,
+                    error: Some(format!("接続に失敗しました\n({err})")),
+                },
+            },
+        };
+
+        outcome = menu::run_from(terminal, retry)?;
+    }
+}
+
+/// ローカル1人プレイ+CPU敵。イントロ表示は呼び出し側([`run_menu_then_launch`])が
+/// 済ませている前提。
+fn run_local(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
+    let mut input = KeyboardInput::new();
     let mut audio = RodioPlayer::new();
     let mut state = GameState::new();
 
@@ -222,6 +275,8 @@ fn run_host(
     let mut state = GameState::new_multiplayer(num_players);
     // 参加者が揃うまではロビー画面。揃ったらホストのSPACEで対戦が始まる。
     state.enter_lobby(num_players);
+    // 毎フレーム組み立て直さないよう、待ち受けアドレスは先に文字列化しておく。
+    let host_addr = server.local_addr().to_string();
 
     audio.play_bgm(Bgm::Title);
 
@@ -258,7 +313,10 @@ fn run_host(
         // 送信できなくてもホストのプレイは続けられるので、失敗は無視する。
         let _ = server.send_snapshot(&state);
 
-        terminal.draw(|frame| render::draw_with_perspective(frame, &state, zoom, Some(0)))?;
+        // ロビー画面で参加者へ伝える接続先を出すため、自分の待ち受けアドレスを渡す。
+        terminal.draw(|frame| {
+            render::draw_with_perspective(frame, &state, zoom, Some(0), Some(&host_addr))
+        })?;
 
         sleep_until_next_tick(frame_start);
     }
@@ -302,7 +360,7 @@ fn run_client(
 
         terminal.draw(|frame| match state.as_deref() {
             Some(state) => {
-                render::draw_with_perspective(frame, state, zoom, Some(client.player_id))
+                render::draw_with_perspective(frame, state, zoom, Some(client.player_id), None)
             }
             None => render::draw_connecting(frame, addr),
         })?;

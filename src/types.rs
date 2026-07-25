@@ -16,12 +16,16 @@ pub enum Direction {
 }
 
 /// 入力から変換される、その tick で行うアクション。
+///
+/// CONTRACT CHANGE: `ToggleGodMode` を追加。通常操作には無いキーに割り当てる
+/// 隠しコマンドで、押すたびに強制無敵モードのON/OFFを切り替える。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Move(Direction),
     PlaceBomb,
     Pause,
     Quit,
+    ToggleGodMode,
     None,
 }
 

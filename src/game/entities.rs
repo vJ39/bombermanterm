@@ -16,6 +16,9 @@ pub struct Player {
     /// 無敵モードの残り秒数。0より大きい間は爆風・敵接触で死亡しない。
     /// CONTRACT CHANGE: `Invincible` アイテム対応のため追加したフィールド。
     pub invincible_remaining: f32,
+    /// 隠しコマンド(`god`)でON/OFFする、時間制限の無い強制無敵モード。
+    /// CONTRACT CHANGE: `Action::ToggleGodMode` 対応のため追加したフィールド。
+    pub god_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,12 +115,13 @@ impl Player {
             speed: 1.0,
             alive: true,
             invincible_remaining: 0.0,
+            god_mode: false,
         }
     }
 
-    /// 無敵モード中か。
+    /// 無敵モード中か(時限アイテムによるものと、隠しコマンドの強制ONの両方を含む)。
     pub fn is_invincible(&self) -> bool {
-        self.invincible_remaining > 0.0
+        self.invincible_remaining > 0.0 || self.god_mode
     }
 }
 
@@ -308,6 +312,21 @@ mod tests {
         assert!(player.power >= 1);
         assert!(player.bomb_capacity >= 1);
         assert!(player.speed > 0.0);
+        assert!(!player.god_mode);
+        assert!(!player.is_invincible());
+    }
+
+    #[test]
+    fn is_invincible_reflects_either_timed_or_god_mode() {
+        let mut player = Player::new((0, 0));
+        assert!(!player.is_invincible());
+
+        player.invincible_remaining = 1.0;
+        assert!(player.is_invincible());
+
+        player.invincible_remaining = 0.0;
+        player.god_mode = true;
+        assert!(player.is_invincible());
     }
 
     #[test]

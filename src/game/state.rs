@@ -187,6 +187,13 @@ impl GameState {
             self.player_move_cooldown -= dt;
         }
 
+        // 隠しコマンドによる強制無敵トグルは、プレイヤーの生死に関わらず効く
+        // デバッグ用の裏機能なので、生存チェックより前で処理する。
+        if matches!(action, Action::ToggleGodMode) {
+            self.player.god_mode = !self.player.god_mode;
+            return;
+        }
+
         if !self.player.alive {
             return;
         }
@@ -902,5 +909,43 @@ mod tests {
 
         assert!(!state.player.is_invincible());
         assert_eq!(state.player.invincible_remaining, 0.0);
+    }
+
+    #[test]
+    fn toggle_god_mode_action_flips_the_flag_regardless_of_move_cooldown() {
+        let mut audio = NoopAudio::default();
+        let mut state = GameState::new();
+        state.tick(0.033, Action::PlaceBomb, &mut audio); // -> Playing
+        assert!(!state.player.god_mode);
+
+        state.tick(0.033, Action::ToggleGodMode, &mut audio);
+        assert!(state.player.god_mode);
+        assert!(state.player.is_invincible());
+
+        state.tick(0.033, Action::ToggleGodMode, &mut audio);
+        assert!(!state.player.god_mode);
+    }
+
+    #[test]
+    fn god_mode_makes_player_immune_to_explosion_without_a_timer() {
+        let mut audio = NoopAudio::default();
+        let mut state = GameState::new();
+        state.tick(0.033, Action::PlaceBomb, &mut audio); // -> Playing
+        state.bombs.clear();
+
+        state.player.god_mode = true;
+        let starting_lives = state.lives;
+
+        let mut bomb = Bomb::new(state.player.pos, 1, true);
+        bomb.timer = 0.001;
+        state.bombs.push(bomb);
+        state.tick(0.01, Action::None, &mut audio);
+
+        assert_eq!(state.lives, starting_lives);
+        assert!(state.player.alive);
+        assert!(
+            state.player.god_mode,
+            "god mode must stay on until toggled again (unlike the timed item)"
+        );
     }
 }

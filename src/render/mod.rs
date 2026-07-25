@@ -209,7 +209,7 @@ fn cell_span(state: &GameState, pos: Coord) -> Span<'static> {
     }
 
     if state.player.alive && state.player.pos == pos {
-        let fg = player_fg(state.player.invincible_remaining);
+        let fg = player_fg(&state.player);
         return Span::styled(
             " @".to_string(),
             Style::default()
@@ -249,11 +249,17 @@ fn cell_span(state: &GameState, pos: Coord) -> Span<'static> {
     tile_span(state.map.tile_at(pos), pos)
 }
 
-/// 無敵モード中は残り時間に応じて色を切り替え、点滅させて分かりやすくする。
-/// 現在時刻に依存せず `invincible_remaining` の値だけで決定するため、
-/// tick間隔が変わっても点滅サイクルは一定になる。
-fn player_fg(invincible_remaining: f32) -> Color {
-    if invincible_remaining <= 0.0 {
+/// プレイヤーの表示色。
+/// - 隠しコマンドの強制無敵(`god_mode`)中は、時間に依存しない固定の金色にする
+///   (`invincible_remaining` が常に0のままなので、時限アイテムと同じ点滅方式は使えない)。
+/// - 時限アイテムによる無敵中は、残り時間に応じて色を切り替えて点滅させる。
+///   現在時刻に依存せず `invincible_remaining` の値だけで決定するため、
+///   tick間隔が変わっても点滅サイクルは一定になる。
+fn player_fg(player: &crate::game::entities::Player) -> Color {
+    if player.god_mode {
+        return Color::Rgb(255, 215, 0);
+    }
+    if player.invincible_remaining <= 0.0 {
         return Color::LightYellow;
     }
     const RAINBOW: [Color; 4] = [
@@ -262,24 +268,30 @@ fn player_fg(invincible_remaining: f32) -> Color {
         Color::LightMagenta,
         Color::White,
     ];
-    let idx = ((invincible_remaining * 10.0) as i64).unsigned_abs() as usize % RAINBOW.len();
+    let idx =
+        ((player.invincible_remaining * 10.0) as i64).unsigned_abs() as usize % RAINBOW.len();
     RAINBOW[idx]
 }
 
 /// エンティティが乗っていないタイル自体の見た目。
+///
+/// 本家ボンバーマンの「硬い壁=石/コンクリート」「壊せるブロック=木箱/レンガ」の
+/// 見分けやすさを、網掛け文字の密度差(硬い壁ほど密)と色味差(壁=無機質なグレー系/
+/// ブロック=暖色の茶系)の二重の手がかりで再現する。
 fn tile_span(tile: Tile, pos: Coord) -> Span<'static> {
     match tile {
         Tile::Wall => Span::styled(
-            "██".to_string(),
+            "▓▓".to_string(),
             Style::default()
-                .fg(Color::Rgb(225, 225, 235))
-                .bg(Color::Rgb(45, 45, 52)),
+                .fg(Color::Rgb(205, 208, 215))
+                .bg(Color::Rgb(72, 76, 88))
+                .add_modifier(Modifier::BOLD),
         ),
         Tile::Block => Span::styled(
             "▒▒".to_string(),
             Style::default()
-                .fg(Color::Rgb(230, 130, 40))
-                .bg(grass_bg(pos))
+                .fg(Color::Rgb(220, 145, 60))
+                .bg(Color::Rgb(96, 56, 24))
                 .add_modifier(Modifier::BOLD),
         ),
         Tile::Empty => Span::styled("  ".to_string(), Style::default().bg(grass_bg(pos))),

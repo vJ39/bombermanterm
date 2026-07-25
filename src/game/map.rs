@@ -9,12 +9,17 @@
 //!   抽選して該当マスに `ItemTile` として残す。それ以外の呼び出しは `None`。
 
 use crate::types::{Coord, ItemKind, Tile};
+use serde::{Deserialize, Serialize};
 
 /// 破壊可能ブロックが初期配置される確率。
 const BLOCK_SPAWN_RATE: f64 = 0.3;
 /// ブロック破壊時にアイテムが出現する確率。
 const ITEM_DROP_RATE: f64 = 0.3;
 
+/// CONTRACT CHANGE: ネットワーク対戦でマップごとクライアントへ送るため
+/// `serde::Serialize` / `serde::Deserialize` の derive を追加した
+/// (非公開フィールド `tiles` も同一クレート内なのでそのまま derive できる)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameMap {
     pub width: usize,
     pub height: usize,

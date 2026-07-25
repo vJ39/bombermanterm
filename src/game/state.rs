@@ -36,11 +36,18 @@
 //!   - 本体ロジックは [`GameState::tick_multi`] に置き、`tick` はそこへ1人分の
 //!     アクションを渡す後方互換ラッパーとして残した。
 //!   - 複数人対戦の初期状態は [`GameState::new_multiplayer`] で作る。
+//! - CONTRACT CHANGE: ネットワーク対戦(`crate::net`)のため、`GameState` に
+//!   `serde::Serialize` / `serde::Deserialize` の derive と、ロビー画面
+//!   (`Screen::Lobby`)を扱う [`GameState::enter_lobby`] /
+//!   [`GameState::set_lobby_connected`] を追加した。サーバー(ホスト)は
+//!   毎tick この `GameState` をまるごとJSONにしてクライアントへ配り、
+//!   クライアントは受け取った状態を描画するだけ(tickを回さない)。
 
 use crate::audio::AudioPlayer;
 use crate::game::entities::{explosion_cells, Bomb, Enemy, EnemyKind, Explosion, Player};
 use crate::game::map::GameMap;
 use crate::types::{Action, Bgm, Coord, Direction, ItemKind, Screen, SoundEffect, Tile};
+use serde::{Deserialize, Serialize};
 
 /// マップの幅・高さ(壁込み)。奇数にして格子状固定壁と外周壁が綺麗に収まる大きさにする。
 const MAP_WIDTH: usize = 15;
@@ -51,8 +58,12 @@ const PLAYER_START: Coord = (1, 1);
 
 /// 複数プレイヤー対戦でサポートするプレイヤー数の下限・上限。
 /// `new_multiplayer` はこの範囲に丸める。
-const MIN_MULTIPLAYER_PLAYERS: usize = 2;
-const MAX_PLAYERS: usize = 4;
+///
+/// CONTRACT CHANGE: `MAX_PLAYERS` を `pub` にした。ネットワーク対戦
+/// (`crate::net`)側でも「最大何人まで受け入れるか」の判断に同じ値が必要で、
+/// 定数を二重に持つと食い違うため、実体はここ(ゲームロジック側)に一本化する。
+pub const MIN_MULTIPLAYER_PLAYERS: usize = 2;
+pub const MAX_PLAYERS: usize = 4;
 
 /// 出現させる敵の種類(1体ずつ)。
 const ENEMY_KINDS: [EnemyKind; 3] = [EnemyKind::Chaser, EnemyKind::Wander, EnemyKind::Avoider];
@@ -80,6 +91,7 @@ const SCORE_PER_ENEMY: u32 = 200;
 /// Invincible アイテム1個で付与される無敵時間(秒)。
 const INVINCIBLE_DURATION: f32 = 5.0;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub screen: Screen,
     pub map: GameMap,
@@ -126,10 +138,8 @@ impl GameState {
     /// CPU敵は出さず(`enemies` は空)、各プレイヤーをマップ四隅にもっとも近い
     /// 進入可能マスへ重複なく配置する。`num_players` は 2〜`MAX_PLAYERS` に丸める。
     /// 画面は `new` と同じく `Screen::Title` から始まり、タイトルで入力があると
-    /// 同じ人数のまま対戦が始まる。
-    // 対戦の入口はまだ `main.rs` から呼んでいない(ネットワーク対戦は次フェーズ)ため、
-    // バイナリ単体ビルドでは未使用として警告される。土台として公開しておく。
-    #[allow(dead_code)]
+    /// 同じ人数のまま対戦が始まる。ネットワーク対戦のホストは、この直後に
+    /// [`GameState::enter_lobby`] を呼んで参加者待ちの画面から始める。
     pub fn new_multiplayer(num_players: usize) -> Self {
         let num_players = num_players.clamp(MIN_MULTIPLAYER_PLAYERS, MAX_PLAYERS);
         let map = GameMap::generate(MAP_WIDTH, MAP_HEIGHT);
@@ -162,6 +172,29 @@ impl GameState {
         self.players.first().map(|player| player.lives).unwrap_or(0)
     }
 
+    /// ネットワーク対戦の参加者待ち画面へ移る。
+    ///
+    /// `required` は開始に必要な人数(ホスト自身を含む)。参加人数は
+    /// ホスト1人だけの状態から始め、以降は [`GameState::set_lobby_connected`]
+    /// で更新する。
+    pub fn enter_lobby(&mut self, required: usize) {
+        self.screen = Screen::Lobby {
+            connected: 1,
+            required,
+        };
+    }
+
+    /// ロビー表示中の参加人数(ホスト自身を含む)を更新する。
+    /// ロビー以外の画面では何もしない(対戦中に呼ばれても無害にするため)。
+    pub fn set_lobby_connected(&mut self, connected: usize) {
+        if let Screen::Lobby { required, .. } = self.screen {
+            self.screen = Screen::Lobby {
+                connected,
+                required,
+            };
+        }
+    }
+
     /// 固定tickでの状態更新(1人プレイ用の後方互換ラッパー)。
     ///
     /// 本体ロジックは [`GameState::tick_multi`] にあり、ここは受け取った1つの
@@ -178,6 +211,7 @@ impl GameState {
     pub fn tick_multi(&mut self, dt: f32, actions: &[Action], audio: &mut dyn AudioPlayer) {
         match self.screen {
             Screen::Title => self.tick_title(actions, audio),
+            Screen::Lobby { .. } => self.tick_lobby(actions, audio),
             Screen::Playing => self.tick_playing(dt, actions, audio),
             Screen::Cleared | Screen::GameOver | Screen::MatchResult(_) => {
                 self.tick_result(actions, audio)
@@ -194,6 +228,27 @@ impl GameState {
             return;
         }
         self.start_new_game(audio);
+    }
+
+    /// ロビー画面: 必要人数が揃っている間だけ、ホスト(添字0)のSPACEで対戦を開始する。
+    ///
+    /// 開始できるのはホストだけなので、クライアント(添字1以降)の入力は見ない。
+    /// 参加人数の更新は [`GameState::set_lobby_connected`] 側の責務で、ここでは
+    /// 現在値を条件判定にだけ使う。
+    fn tick_lobby(&mut self, actions: &[Action], audio: &mut dyn AudioPlayer) {
+        let Screen::Lobby {
+            connected,
+            required,
+        } = self.screen
+        else {
+            return;
+        };
+        if connected < required {
+            return;
+        }
+        if matches!(actions.first(), Some(Action::PlaceBomb)) {
+            self.start_new_game(audio);
+        }
     }
 
     /// クリア/ゲームオーバー/対戦結果画面: ボム設置キー(SPACE)でタイトルへ戻る
@@ -1650,5 +1705,121 @@ mod tests {
             assert_eq!(player.lives, STARTING_LIVES);
             assert!(player.alive);
         }
+    }
+
+    // ここから下はネットワーク対戦のロビー画面(`Screen::Lobby`)の検証。
+
+    #[test]
+    fn enter_lobby_starts_with_the_host_alone() {
+        let mut state = GameState::new_multiplayer(4);
+        state.enter_lobby(4);
+        assert_eq!(
+            state.screen,
+            Screen::Lobby {
+                connected: 1,
+                required: 4
+            },
+            "ロビーはホスト1人から始まる"
+        );
+    }
+
+    #[test]
+    fn set_lobby_connected_updates_only_while_in_the_lobby() {
+        let mut audio = NoopAudio::default();
+        let mut state = GameState::new_multiplayer(3);
+        state.enter_lobby(3);
+
+        state.set_lobby_connected(2);
+        assert_eq!(
+            state.screen,
+            Screen::Lobby {
+                connected: 2,
+                required: 3
+            }
+        );
+
+        // 対戦が始まった後の呼び出しは無害(画面を巻き戻さない)。
+        state.set_lobby_connected(3);
+        state.tick_multi(0.033, &[Action::PlaceBomb], &mut audio);
+        assert_eq!(state.screen, Screen::Playing);
+        state.set_lobby_connected(1);
+        assert_eq!(state.screen, Screen::Playing);
+    }
+
+    #[test]
+    fn lobby_waits_until_the_required_players_are_connected() {
+        let mut audio = NoopAudio::default();
+        let mut state = GameState::new_multiplayer(3);
+        state.enter_lobby(3);
+
+        // 人数が足りない間はホストが押しても始まらない。
+        state.set_lobby_connected(2);
+        state.tick_multi(0.033, &[Action::PlaceBomb], &mut audio);
+        assert_eq!(
+            state.screen,
+            Screen::Lobby {
+                connected: 2,
+                required: 3
+            }
+        );
+
+        // 揃えば始まる。
+        state.set_lobby_connected(3);
+        state.tick_multi(0.033, &[Action::PlaceBomb], &mut audio);
+        assert_eq!(state.screen, Screen::Playing);
+        assert!(
+            state.bombs.is_empty(),
+            "開始のキー入力でボムを置いてしまわないこと"
+        );
+        assert!(state.enemies.is_empty(), "対戦なのでCPU敵は出さない");
+        assert_eq!(state.players.len(), 3);
+    }
+
+    #[test]
+    fn only_the_host_can_start_the_match_from_the_lobby() {
+        let mut audio = NoopAudio::default();
+        let mut state = GameState::new_multiplayer(3);
+        state.enter_lobby(3);
+        state.set_lobby_connected(3);
+
+        // クライアント(添字1・2)がSPACEを押しても始まらない。
+        state.tick_multi(
+            0.033,
+            &[Action::None, Action::PlaceBomb, Action::PlaceBomb],
+            &mut audio,
+        );
+        assert_eq!(
+            state.screen,
+            Screen::Lobby {
+                connected: 3,
+                required: 3
+            }
+        );
+
+        // ホストの移動キーでも始まらない(開始はSPACEだけ)。
+        state.tick_multi(0.033, &[Action::Move(Direction::Right)], &mut audio);
+        assert!(matches!(state.screen, Screen::Lobby { .. }));
+
+        state.tick_multi(0.033, &[Action::PlaceBomb], &mut audio);
+        assert_eq!(state.screen, Screen::Playing);
+    }
+
+    #[test]
+    fn lobby_tick_is_harmless_without_any_input() {
+        let mut audio = NoopAudio::default();
+        let mut state = GameState::new_multiplayer(2);
+        state.enter_lobby(2);
+        state.set_lobby_connected(2);
+
+        // 入力が1つも無い(空スライス)tickでもパニックせず、画面も変わらない。
+        state.tick_multi(0.033, &[], &mut audio);
+        assert_eq!(
+            state.screen,
+            Screen::Lobby {
+                connected: 2,
+                required: 2
+            }
+        );
+        assert!(audio.bgm_calls.is_empty(), "BGMの切替も起きない");
     }
 }

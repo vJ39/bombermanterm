@@ -2,11 +2,18 @@
 //!
 //! Player/Enemy/Bomb のコンストラクタ、Enemy::decide_move、
 //! explosion_cells (爆風範囲計算) を実装するフェーズ。
+//!
+//! CONTRACT CHANGE: ネットワーク対戦(`crate::net`)でサーバーがゲーム状態ごと
+//! JSONにしてクライアントへ送るため、各エンティティに
+//! `serde::Serialize` / `serde::Deserialize` の derive を追加した。
+//! フィールド構成・挙動は変えていない、derive の追加のみ。
 
 use crate::game::map::GameMap;
 use crate::types::{Coord, Direction, Tile};
 use rand::RngExt;
+use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Player {
     pub pos: Coord,
     pub power: u32,
@@ -32,19 +39,21 @@ pub struct Player {
     pub score: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnemyKind {
     Wander,
     Chaser,
     Avoider,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Enemy {
     pub pos: Coord,
     pub kind: EnemyKind,
     pub alive: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bomb {
     pub pos: Coord,
     /// 設置したプレイヤーの `GameState::players` 内の添字。
@@ -56,6 +65,7 @@ pub struct Bomb {
     pub power: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Explosion {
     pub cells: Vec<Coord>,
     pub remaining: f32,

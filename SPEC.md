@@ -62,18 +62,19 @@ assets/
 - 通信: `tokio` の非同期TCP。UDPではなくTCPを選ぶ理由は、4人対戦程度の通信量なら信頼性(パケットロス対応)を自前実装するコストの方が高くつくため
 - シリアライズ: `serde` + `serde_json`（可読性・デバッグのしやすさを優先。パフォーマンスが問題になれば`bincode`等へ差し替え可能な設計にする）
 - フレーミング: メッセージ長(4byte)+JSON本体、のシンプルな長さプレフィックス方式
-- プロトコル（`src/net/protocol.rs`）:
-  - `ClientMessage::Input(Action)` — 毎tickの自分の入力
-  - `ClientMessage::Ready` — ロビーでの準備完了
-  - `ServerMessage::Welcome { player_id }` — 接続直後に割り当てられるID
-  - `ServerMessage::Snapshot(GameStateSnapshot)` — 毎tickブロードキャストされる最新状態(描画に必要な情報のみ)
-  - `ServerMessage::PlayerJoined { player_id }` / `ServerMessage::PlayerLeft { player_id }`
+- プロトコル（`src/net/protocol.rs`、実装済みのもの）:
+  - `ClientMessage::Input(Action)` — 自分の入力。入力が無いtickは送らない（サーバーは届いた入力だけを次のtickで消費する）
+  - `ServerMessage::Welcome { player_id }` — 接続直後に割り当てられるID。0はホストのローカルプレイヤー用に予約し、クライアントは1から採番
+  - `ServerMessage::Snapshot(Box<GameState>)` — 毎tickブロードキャストされる最新状態
+  - `ServerMessage::PlayerLeft { player_id }` — 切断の通知
+  - 当初案から変更した点: 描画用の別型`GameStateSnapshot`は作らず`GameState`をまるごと送る（同じ状態を二重に定義・保守しなくてよいため）。`ClientMessage::Ready`と`ServerMessage::PlayerJoined`は作っていない（開始判断はホストのみ、参加人数はスナップショットの`Screen::Lobby`で全員に届くため不要）
+- スレッド構成: **tokioはネットワーク専用スレッドの中だけで動かし、メインループ(crossterm+ratatui)は同期のまま**にする。両者の橋渡しは`std::sync::mpsc`で行う。ゲームロジック(`GameState::tick_multi`)を呼ぶのはホストのメインスレッドで、`net::server`は入力の集約とスナップショットの中継に徹する（既存のメインループを非同期化せずに済ませるため）
 - 起動モード（CLI引数、`clap`使用）:
   - `bombermanterm` … 従来通りローカル1人+CPU
-  - `bombermanterm host --port <PORT>` … ホスト(サーバー兼プレイヤー)として起動、他プレイヤーの接続を待つ
-  - `bombermanterm join <ADDR> --port <PORT>` … クライアントとして接続
-- ロビー画面: 接続人数を表示し、ホストが開始キーを押すとゲーム開始（新規`Screen::Lobby`を追加）
-- 切断耐性: v2の初期実装では「切断されたプレイヤーはその場でリタイア扱い」に留め、再接続は将来拡張
+  - `bombermanterm host --port <PORT> [--players <N>]` … ホスト(サーバー兼プレイヤー)として起動、他プレイヤーの接続を待つ。`N`は2〜4(既定3)
+  - `bombermanterm join <ADDR>` … クライアントとして接続。`ADDR`は`host:port`形式（当初案の`join <ADDR> --port <PORT>`から変更）
+- ロビー画面: 参加人数を表示し、必要人数が揃った状態でホストがSPACEを押すとゲーム開始（新規`Screen::Lobby { connected, required }`）。クライアントはこの画面もスナップショットとして受け取って描画する
+- 切断耐性: v2の初期実装では「切断されたプレイヤーはその場でリタイア扱い(以降の入力は無し)」に留め、再接続は将来拡張
 
 ### 高解像度描画（ドット絵風・ハーフブロック疑似2倍解像度）
 - `aquaterm`（`src/framebuffer.rs`）の手法を踏襲: 論理ピクセルグリッド(1マス=8x8ピクセル程度)を持ち、上下2ピクセルを1端末セルにまとめて上半分ブロック文字`▀`(fg=上ピクセル色, bg=下ピクセル色)で描画する。端末フォントは縦長なため、この方式で見た目がほぼ正方形ピクセルになる

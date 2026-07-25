@@ -13,8 +13,11 @@
 //!   呼び出し側([`crate::main`])が保持して `draw` に渡す。
 //! - 同一マスへの重なり優先順位(奥→手前): タイル(背景) < ボム < 敵 < プレイヤー < 爆風。
 //!   爆風は演出上もっとも目立たせたいため最前面に描画する。
-//! - `GameState::players` は複数人を持てるが、この描画は1人プレイ向けのままで
-//!   先頭のプレイヤー(プレイヤー0)だけを描く。複数人の同時描画は次フェーズで対応する。
+//! - `GameState::players` の全員を、添字ごとの色([`PLAYER_COLORS`])で描く。
+//!   プレイヤー0の色は従来と同じ白なので、1人プレイの見た目は変わらない。
+//! - ネットワーク対戦では「画面を見ている人がどのプレイヤーか」で表示を変えたいので、
+//!   [`draw_with_perspective`] に自分のプレイヤー番号を渡せるようにしてある。
+//!   ローカル1人プレイは従来どおり [`draw`](自分の番号を指定しない)を使う。
 
 mod pixel_canvas;
 mod sprites;
@@ -39,15 +42,76 @@ pub const DEFAULT_ZOOM: usize = 1;
 pub const MIN_ZOOM: usize = 1;
 pub const MAX_ZOOM: usize = 3;
 
+/// プレイヤー添字ごとの色。添字0は従来の1人プレイと同じ白。
+const PLAYER_COLORS: [PlayerColor; 4] = [
+    PlayerColor::White,
+    PlayerColor::Black,
+    PlayerColor::Red,
+    PlayerColor::Blue,
+];
+
 /// 画面全体を `state.screen` に応じて描画する。`zoom` はPlaying画面のみで使う。
+///
+/// ローカル1人プレイ向けの入口。ネットワーク対戦では
+/// [`draw_with_perspective`] に自分のプレイヤー番号を渡す。
 pub fn draw(frame: &mut Frame, state: &GameState, zoom: usize) {
+    draw_with_perspective(frame, state, zoom, None);
+}
+
+/// 「画面を見ている人がどのプレイヤーか」を踏まえて描画する。
+///
+/// `local_player` は `GameState::players` 内の自分の添字。ネットワーク対戦で
+/// 4人が同じ盤面を見るため、HUDで自分の色・番号が分かるようにする。
+/// `None` はローカル1人プレイ(自分が誰かを示す必要が無い)。
+pub fn draw_with_perspective(
+    frame: &mut Frame,
+    state: &GameState,
+    zoom: usize,
+    local_player: Option<usize>,
+) {
     match state.screen {
         Screen::Title => draw_title(frame),
-        Screen::Playing => draw_playing(frame, state, zoom),
+        Screen::Lobby {
+            connected,
+            required,
+        } => draw_lobby(frame, connected, required, local_player),
+        Screen::Playing => draw_playing(frame, state, zoom, local_player),
         Screen::Cleared => draw_result(frame, state, true),
         Screen::GameOver => draw_result(frame, state, false),
         Screen::MatchResult(winner) => draw_match_result(frame, winner),
     }
+}
+
+/// サーバーからの最初のスナップショットが届くまでの待ち画面(クライアント専用)。
+///
+/// クライアントは自分では状態を持たないので、接続直後の1tickだけ
+/// 描画するものが無い。その間に出す文字だけの画面。
+pub fn draw_connecting(frame: &mut Frame, addr: &str) {
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "CONNECTED",
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(format!("{addr} のホストと同期しています…")),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[ Esc / q ] 退出",
+            Style::default().fg(Color::Gray),
+        )),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let paragraph = Paragraph::new(Text::from(lines))
+        .alignment(Alignment::Center)
+        .block(block);
+
+    frame.render_widget(paragraph, centered_rect(52, 9, frame.area()));
 }
 
 /// `area` の中央に `width` x `height` の矩形を配置する。
@@ -104,13 +168,84 @@ fn draw_title(frame: &mut Frame) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_playing(frame: &mut Frame, state: &GameState, zoom: usize) {
+/// ネットワーク対戦の参加者待ち画面。
+///
+/// 凝った演出は置かず、参加人数と開始操作の案内だけを出す。ホスト
+/// (`local_player == Some(0)`)には開始キーの案内を、クライアントには
+/// ホスト待ちであることを表示する。
+fn draw_lobby(frame: &mut Frame, connected: usize, required: usize, local_player: Option<usize>) {
+    let is_host = local_player == Some(0);
+    let ready = connected >= required;
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "NETWORK BATTLE - LOBBY",
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("参加者 {connected} / {required} 人"),
+            Style::default()
+                .fg(if ready {
+                    Color::LightGreen
+                } else {
+                    Color::White
+                })
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    if let Some(idx) = local_player {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "あなたは PLAYER {}{}",
+                idx + 1,
+                if is_host { " (ホスト)" } else { "" }
+            ),
+            Style::default().fg(player_hud_color(idx)),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    let hint = match (is_host, ready) {
+        (true, true) => "[ SPACE ] 対戦開始",
+        (true, false) => "参加者が揃うまでお待ちください",
+        (false, _) => "ホストの開始待ちです",
+    };
+    lines.push(Line::from(Span::styled(
+        hint,
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "[ Esc / q ] 退出",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::LightCyan))
+        .title(" BombermanTerm ");
+    let paragraph = Paragraph::new(Text::from(lines))
+        .alignment(Alignment::Center)
+        .block(block);
+
+    frame.render_widget(paragraph, centered_rect(52, 14, frame.area()));
+}
+
+fn draw_playing(frame: &mut Frame, state: &GameState, zoom: usize, local_player: Option<usize>) {
     let area = frame.area();
 
     let [status_area, field_container] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
-    let status = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!(" SCORE {:06} ", state.score()),
             Style::default()
@@ -126,14 +261,40 @@ fn draw_playing(frame: &mut Frame, state: &GameState, zoom: usize) {
                 .bg(Color::Red)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
-        Span::styled(
-            format!(" x{zoom} "),
-            Style::default().fg(Color::Black).bg(Color::Gray),
-        ),
-    ]);
+    ];
+
+    // 対戦中は、誰が生き残っているか・自分がどのプレイヤーかを出す
+    // (4人が同じ盤面を見るため、色と番号の対応が分からないと操作できない)。
+    if state.players.len() > 1 {
+        for (idx, player) in state.players.iter().enumerate() {
+            let you_mark = if local_player == Some(idx) { "(YOU)" } else { "" };
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                format!(
+                    " P{}{} {} ",
+                    idx + 1,
+                    you_mark,
+                    if player.alive { "●" } else { "✕" }
+                ),
+                if player.alive {
+                    Style::default()
+                        .fg(player_hud_color(idx))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ));
+        }
+    }
+
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        format!(" x{zoom} "),
+        Style::default().fg(Color::Black).bg(Color::Gray),
+    ));
+
     frame.render_widget(
-        Paragraph::new(status).alignment(Alignment::Center),
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
         status_area,
     );
 
@@ -266,12 +427,15 @@ fn render_field_canvas(state: &GameState) -> PixelCanvas {
                 canvas.blit_sprite(ox, oy, &enemy_sprite(enemy_color(enemy.kind)));
             }
 
-            // 1人プレイ向けの描画のため、先頭のプレイヤーだけを描く。
-            if let Some(player) = state.players.first()
-                && player.alive
-                && player.pos == pos
+            // 生存プレイヤーを添字ごとの色で描く。同じマスに複数人が重なった場合は
+            // 添字の小さいプレイヤーを手前に描く(重なりは一時的なので優先順位は固定でよい)。
+            if let Some((idx, player)) = state
+                .players
+                .iter()
+                .enumerate()
+                .find(|(_, player)| player.alive && player.pos == pos)
             {
-                canvas.blit_sprite(ox, oy, &player_sprite_for(player));
+                canvas.blit_sprite(ox, oy, &player_sprite_for(player, idx));
             }
 
             if state
@@ -312,8 +476,9 @@ fn grass_bg(pos: Coord) -> Color {
 /// - 時限アイテムによる無敵中は、残り時間に応じてスーツ色を切り替えて点滅させる。
 ///   現在時刻に依存せず `invincible_remaining` の値だけで決定するため、
 ///   tick間隔が変わっても点滅サイクルは一定になる。
-/// - 通常時は素の白スーツ(1人プレイの既定色)。
-fn player_sprite_for(player: &crate::game::entities::Player) -> Sprite {
+/// - 通常時は添字ごとの色([`PLAYER_COLORS`])。添字0は白なので、1人プレイの
+///   見た目は従来と変わらない。
+fn player_sprite_for(player: &crate::game::entities::Player, idx: usize) -> Sprite {
     const GOD_SUIT: Color = Color::Rgb(255, 215, 0);
     const GOD_SUIT_LIGHT: Color = Color::Rgb(255, 240, 140);
     const RAINBOW: [(Color, Color); 4] = [
@@ -327,12 +492,25 @@ fn player_sprite_for(player: &crate::game::entities::Player) -> Sprite {
         return player_sprite_with_suit(GOD_SUIT, GOD_SUIT_LIGHT);
     }
     if player.invincible_remaining > 0.0 {
-        let idx = ((player.invincible_remaining * 10.0) as i64).unsigned_abs() as usize
-            % RAINBOW.len();
-        let (suit, suit_light) = RAINBOW[idx];
+        // プレイヤー添字ではなく点滅の位相。引数の `idx` と紛れないよう別名にする。
+        let phase =
+            ((player.invincible_remaining * 10.0) as i64).unsigned_abs() as usize % RAINBOW.len();
+        let (suit, suit_light) = RAINBOW[phase];
         return player_sprite_with_suit(suit, suit_light);
     }
-    player_sprite(PlayerColor::White)
+    player_sprite(PLAYER_COLORS[idx % PLAYER_COLORS.len()])
+}
+
+/// HUDでプレイヤー番号に添えるテキスト色。フィールドのスプライト色
+/// ([`PLAYER_COLORS`])と対応させる。黒スーツはそのままでは端末で読みにくいため
+/// HUDでは灰色に寄せる。
+fn player_hud_color(idx: usize) -> Color {
+    match PLAYER_COLORS[idx % PLAYER_COLORS.len()] {
+        PlayerColor::White => Color::White,
+        PlayerColor::Black => Color::Gray,
+        PlayerColor::Red => Color::LightRed,
+        PlayerColor::Blue => Color::LightBlue,
+    }
 }
 
 fn enemy_color(kind: EnemyKind) -> EnemyColor {
@@ -387,6 +565,10 @@ mod tests {
 
         for screen in [
             Screen::Title,
+            Screen::Lobby {
+                connected: 1,
+                required: 4,
+            },
             Screen::Playing,
             Screen::Cleared,
             Screen::GameOver,
@@ -415,12 +597,155 @@ mod tests {
 
     #[test]
     fn playing_field_renders_with_multiple_players_present() {
-        // 複数人の同時描画は次フェーズだが、`players` が複数あっても
-        // 描画経路がpanicしない(先頭のプレイヤーを描く)ことを確認する。
         let mut state = GameState::new_multiplayer(4);
         state.screen = Screen::Playing;
 
         let text = rendered_text(&state);
         assert!(text.contains("SCORE 000000"));
+    }
+
+    /// `state` を自分のプレイヤー番号付きで描画し、画面の文字列を返す。
+    fn rendered_text_as(state: &GameState, local_player: Option<usize>) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| draw_with_perspective(frame, state, DEFAULT_ZOOM, local_player))
+            .expect("draw must not fail");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn versus_hud_lists_every_player_and_marks_the_local_one() {
+        let mut state = GameState::new_multiplayer(4);
+        state.screen = Screen::Playing;
+        state.players[2].alive = false;
+
+        let text = rendered_text_as(&state, Some(1));
+        for label in ["P1", "P2(YOU)", "P3", "P4"] {
+            assert!(text.contains(label), "HUDに {label} が並ぶこと");
+        }
+        assert!(text.contains("✕"), "脱落したプレイヤーの印が出ること");
+        assert!(text.contains("●"), "生存しているプレイヤーの印が出ること");
+    }
+
+    #[test]
+    fn single_player_hud_keeps_the_score_and_lives_layout() {
+        // 1人プレイでは対戦用のプレイヤー一覧を出さない(従来の表示のまま)。
+        let mut state = GameState::new();
+        state.screen = Screen::Playing;
+
+        let text = rendered_text(&state);
+        assert!(text.contains("SCORE 000000"));
+        assert!(text.contains("LIVES 3"));
+        assert!(!text.contains("P1"), "1人プレイに対戦HUDは出さない");
+    }
+
+    #[test]
+    fn each_player_index_gets_its_own_suit_color() {
+        let state = GameState::new_multiplayer(4);
+
+        // 8x8スプライトのスーツ部分(6行目の中央)を代表として色を取り出す。
+        let suit_colors: Vec<Color> = (0..state.players.len())
+            .map(|idx| {
+                player_sprite_for(&state.players[idx], idx).pixels[5][3]
+                    .expect("スーツ部分は透過ではないこと")
+            })
+            .collect();
+
+        assert_eq!(
+            suit_colors[0],
+            player_sprite(PlayerColor::White).pixels[5][3].expect("suit pixel"),
+            "プレイヤー0の色は従来の1人プレイと同じ白のまま"
+        );
+        for (idx, color) in suit_colors.iter().enumerate() {
+            for (other_idx, other) in suit_colors.iter().enumerate() {
+                if idx != other_idx {
+                    assert_ne!(
+                        color, other,
+                        "プレイヤー{idx}と{other_idx}は違う色で描き分けること"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_living_players_are_drawn_on_the_field() {
+        let mut state = GameState::new_multiplayer(4);
+        state.screen = Screen::Playing;
+
+        // 同じマップで「全員生存」と「プレイヤー0以外は脱落」を描き比べ、
+        // 各プレイヤーのマスに差が出ること(=描かれていること)を確認する。
+        let mut only_first = state.clone();
+        for player in only_first.players.iter_mut().skip(1) {
+            player.alive = false;
+        }
+
+        let all_alive = render_field_canvas(&state).to_lines(1);
+        let solo = render_field_canvas(&only_first).to_lines(1);
+
+        for idx in 1..state.players.len() {
+            let (row, col) = state.players[idx].pos;
+            // 1端末セル=縦2ピクセルなので、そのマスの行範囲は半分になる。
+            let line_range =
+                (row as usize * SPRITE_SIZE / 2)..((row as usize + 1) * SPRITE_SIZE / 2);
+            let col_range = (col as usize * SPRITE_SIZE)..((col as usize + 1) * SPRITE_SIZE);
+
+            let differs = line_range.clone().any(|y| {
+                col_range
+                    .clone()
+                    .any(|x| all_alive[y].spans[x].style != solo[y].spans[x].style)
+            });
+            assert!(
+                differs,
+                "プレイヤー{idx}が自分のマス {:?} に描かれていること",
+                (row, col)
+            );
+        }
+    }
+
+    #[test]
+    fn lobby_shows_the_head_count_and_the_host_start_hint() {
+        let mut state = GameState::new_multiplayer(3);
+        state.enter_lobby(3);
+
+        // 人数が足りない間はホストにも開始キーを案内しない。
+        state.set_lobby_connected(2);
+        let waiting = rendered_text_as(&state, Some(0));
+        assert!(waiting.contains("2 / 3"), "参加人数が出ること: {waiting}");
+        assert!(!waiting.contains("SPACE"), "揃うまでは開始を案内しない");
+
+        // 揃ったらホストにだけ開始キーを案内する。
+        state.set_lobby_connected(3);
+        let host_view = rendered_text_as(&state, Some(0));
+        assert!(host_view.contains("3 / 3"));
+        assert!(host_view.contains("SPACE"));
+        assert!(host_view.contains("PLAYER 1"), "自分の番号が分かること");
+
+        let client_view = rendered_text_as(&state, Some(2));
+        assert!(!client_view.contains("SPACE"), "クライアントは開始できない");
+        assert!(client_view.contains("PLAYER 3"));
+    }
+
+    #[test]
+    fn connecting_screen_shows_the_server_address() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| draw_connecting(frame, "127.0.0.1:4321"))
+            .expect("draw must not fail");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(text.contains("127.0.0.1:4321"));
     }
 }

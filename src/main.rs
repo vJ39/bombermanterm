@@ -144,10 +144,33 @@ fn apply_zoom(action: Action, zoom: &mut usize) -> Action {
     }
 }
 
+/// 起動時のオンボーディング画面を表示し、何らかの入力を待つ。
+/// `Ok(true)` なら通常通り続行、`Ok(false)` ならユーザーがこの画面でQuitした。
+fn show_intro(terminal: &mut ratatui::DefaultTerminal, input: &mut KeyboardInput) -> io::Result<bool> {
+    loop {
+        let frame_start = Instant::now();
+
+        let action = input.poll_action();
+        if matches!(action, Action::Quit) {
+            return Ok(false);
+        }
+        if !matches!(action, Action::None) {
+            return Ok(true);
+        }
+
+        terminal.draw(render::draw_intro)?;
+        sleep_until_next_tick(frame_start);
+    }
+}
+
 /// ローカル1人プレイ+CPU敵(引数なしで起動したときの従来の経路)。
 fn run_local(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
-    let mut audio = RodioPlayer::new();
     let mut input = KeyboardInput::new();
+    if !show_intro(terminal, &mut input)? {
+        return Ok(()); // イントロ画面でQuitされた。
+    }
+
+    let mut audio = RodioPlayer::new();
     let mut state = GameState::new();
 
     // GameState::new() は Screen::Title で始まるが、audio を持たないため

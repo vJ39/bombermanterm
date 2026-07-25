@@ -19,6 +19,7 @@
 //!   [`draw_with_perspective`] に自分のプレイヤー番号を渡せるようにしてある。
 //!   ローカル1人プレイは従来どおり [`draw`](自分の番号を指定しない)を使う。
 
+mod intro;
 mod pixel_canvas;
 mod sprites;
 
@@ -112,6 +113,36 @@ pub fn draw_connecting(frame: &mut Frame, addr: &str) {
         .block(block);
 
     frame.render_widget(paragraph, centered_rect(52, 9, frame.area()));
+}
+
+/// 起動時のオンボーディング画面。`GameState` を経由しない独立した画面なので、
+/// `crate::main` から直接呼ぶ(`Screen` には含めない、詳細は `render::intro` 参照)。
+pub fn draw_intro(frame: &mut Frame) {
+    let area = frame.area();
+    let canvas = intro::build_canvas();
+    let art_lines = canvas.to_lines(1);
+    let art_cols = art_lines.first().map(|l| l.spans.len()).unwrap_or(0) as u16;
+    let art_rows = art_lines.len() as u16;
+
+    let art_area = centered_rect(art_cols, art_rows.saturating_add(2), area);
+    frame.render_widget(Paragraph::new(Text::from(art_lines)).alignment(Alignment::Center), art_area);
+
+    let hint_area = Rect::new(
+        area.x,
+        art_area.y.saturating_add(art_area.height),
+        area.width,
+        1,
+    );
+    if hint_area.y < area.y + area.height {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "何かキーを押して開始",
+                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+            )))
+            .alignment(Alignment::Center),
+            hint_area,
+        );
+    }
 }
 
 /// `area` の中央に `width` x `height` の矩形を配置する。
@@ -749,4 +780,5 @@ mod tests {
 
         assert!(text.contains("127.0.0.1:4321"));
     }
+
 }

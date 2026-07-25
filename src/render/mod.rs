@@ -649,17 +649,18 @@ mod tests {
     fn each_player_index_gets_its_own_suit_color() {
         let state = GameState::new_multiplayer(4);
 
-        // 8x8スプライトのスーツ部分(6行目の中央)を代表として色を取り出す。
+        // 16x16スプライトの胴体部分(row12, col7、ハイライトの入らない安定した
+        // スーツ本体マス)を代表として色を取り出す。
         let suit_colors: Vec<Color> = (0..state.players.len())
             .map(|idx| {
-                player_sprite_for(&state.players[idx], idx).pixels[5][3]
+                player_sprite_for(&state.players[idx], idx).pixels[12][7]
                     .expect("スーツ部分は透過ではないこと")
             })
             .collect();
 
         assert_eq!(
             suit_colors[0],
-            player_sprite(PlayerColor::White).pixels[5][3].expect("suit pixel"),
+            player_sprite(PlayerColor::White).pixels[12][7].expect("suit pixel"),
             "プレイヤー0の色は従来の1人プレイと同じ白のまま"
         );
         for (idx, color) in suit_colors.iter().enumerate() {

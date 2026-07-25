@@ -40,19 +40,36 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     // GameState::tick 内で行われる。
     audio.play_bgm(Bgm::Title);
 
+    // 表示スケール(+/-キーで変更)。ゲームロジックには影響しないUI専用の状態なので
+    // GameStateには持たせず、ここで保持して render::draw にだけ渡す。
+    let mut zoom = render::DEFAULT_ZOOM;
+
     let dt_secs = TICK_RATE.as_secs_f32();
 
     loop {
         let frame_start = Instant::now();
 
-        let action = input.poll_action();
-        if matches!(action, Action::Quit) {
+        let raw_action = input.poll_action();
+        if matches!(raw_action, Action::Quit) {
             break;
         }
 
-        state.tick(dt_secs, action, &mut audio);
+        // ズーム変更はUI操作であり、ゲーム進行(移動/設置)としては扱わない。
+        let game_action = match raw_action {
+            Action::ZoomIn => {
+                zoom = (zoom + 1).min(render::MAX_ZOOM);
+                Action::None
+            }
+            Action::ZoomOut => {
+                zoom = zoom.saturating_sub(1).max(render::MIN_ZOOM);
+                Action::None
+            }
+            other => other,
+        };
 
-        terminal.draw(|frame| render::draw(frame, &state))?;
+        state.tick(dt_secs, game_action, &mut audio);
+
+        terminal.draw(|frame| render::draw(frame, &state, zoom))?;
 
         let elapsed = frame_start.elapsed();
         if elapsed < TICK_RATE {

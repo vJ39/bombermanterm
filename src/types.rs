@@ -19,6 +19,9 @@ pub enum Direction {
 ///
 /// CONTRACT CHANGE: `ToggleGodMode` を追加。通常操作には無いキーに割り当てる
 /// 隠しコマンドで、押すたびに強制無敵モードのON/OFFを切り替える。
+/// CONTRACT CHANGE: `ZoomIn`/`ZoomOut` を追加。表示スケール(1論理ピクセルを
+/// 何文字四方で表現するか)を切り替えるUI操作。ゲームロジックには影響しないため
+/// `GameState::tick` には渡さず、`main.rs` 側でUI状態だけを変更する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Move(Direction),
@@ -26,6 +29,8 @@ pub enum Action {
     Pause,
     Quit,
     ToggleGodMode,
+    ZoomIn,
+    ZoomOut,
     None,
 }
 

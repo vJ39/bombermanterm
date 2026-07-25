@@ -75,6 +75,9 @@ impl InputSource for KeyboardInput {
                     KeyCode::Right | KeyCode::Char('l') => Action::Move(Direction::Right),
                     KeyCode::Char(' ') => Action::PlaceBomb,
                     KeyCode::Esc | KeyCode::Char('q') => Action::Quit,
+                    // '=' はUS配列で shift 無しに押せる `+` と同じ物理キーのため両方許容する。
+                    KeyCode::Char('+') | KeyCode::Char('=') => Action::ZoomIn,
+                    KeyCode::Char('-') => Action::ZoomOut,
                     KeyCode::Char(c) if self.feed_code_buffer(c) => Action::ToggleGodMode,
                     _ => Action::None,
                 }
